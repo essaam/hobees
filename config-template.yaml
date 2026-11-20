@@ -1,0 +1,197 @@
+# hobees Configuration Template
+# 
+# This file defines providers, bees, and hives for programmatic setup.
+# API keys are read from environment variables for security.
+# 
+# Usage:
+#   hobees init --config config-template.yaml
+#   hobees import config-template.yaml
+# For headless execution, explicitly run a configured Hive by name:
+#   hobees hive run local-dev "Explain the tradeoffs of SQLite for local development" --json
+# Configured Hives are not selected automatically by `hobees run` or `/goal`.
+# 
+# Environment variable examples:
+#   export OPENAI_API_KEY="sk-..."
+#   export ANTHROPIC_API_KEY="sk-ant-..."
+# For providers without authentication, set api_key_env to "NONE".
+
+providers:
+  # Each provider needs a unique alias (used for referencing in bees/hives)
+  - alias: "openai-main"              # Unique identifier
+    provider_type: "openai"           # openai | anthropic | google_genai | openai_compatible
+    api_key_env: "OPENAI_API_KEY"     # Environment variable name (or "NONE" for no auth)
+    base_url: null                    # Required for openai_compatible (e.g., "http://localhost:8080/v1")
+    default_model: "gpt-4o-mini"      # Default model for this provider
+    input_cost_per_1m: 0.15           # USD per 1M input tokens
+    output_cost_per_1m: 0.60          # USD per 1M output tokens
+    context_window_tokens: 128000     # Context window size
+  
+  - alias: "anthropic-main"
+    provider_type: "anthropic"
+    api_key_env: "ANTHROPIC_API_KEY"
+    default_model: "claude-3-5-sonnet-20241022"
+    input_cost_per_1m: 3.00
+    output_cost_per_1m: 15.00
+    context_window_tokens: 200000
+  
+  - alias: "llamacpp-local"
+    provider_type: "openai_compatible"
+    api_key_env: "NONE"               # Use an environment variable name when auth is required
+    base_url: "http://localhost:8080/v1" # Use an address reachable from the Hobees container
+    default_model: "qwen2.5-coder-7b"
+    input_cost_per_1m: 0.0
+    output_cost_per_1m: 0.0
+    context_window_tokens: 32768
+
+bees:
+  # Each bee references a provider by its alias (not ID)
+  - name: "coder"
+    role_description: "Writes, reviews, and refactors code"
+    system_prompt: |
+      You are an expert software engineer. Write clean, maintainable code.
+      Follow best practices and write tests when appropriate.
+    provider: "openai-main"           # References provider alias
+    model: "gpt-4o"                   # Optional: override provider's default_model
+    temperature: 0.2
+    thinking_level: "off"             # off | low | medium | high
+    tools:                            # Comma-separated or list
+      - read_file
+      - write_file
+      - list_directory
+      - run_python_calc
+  
+  - name: "reviewer"
+    role_description: "Reviews code for quality, security, and best practices"
+    system_prompt: |
+      You are a senior code reviewer. Find bugs, security issues, and style problems.
+      Be thorough but constructive.
+    provider: "anthropic-main"
+    model: "claude-3-5-sonnet-20241022"
+    temperature: 0.0
+    thinking_level: "medium"
+    tools:
+      - read_file
+      - list_directory
+  
+  - name: "planner"
+    role_description: "Creates implementation plans and breaks down tasks"
+    system_prompt: |
+      You are a technical planner. Break down complex goals into actionable steps.
+      Consider dependencies, risks, and testing strategies.
+    provider: "openai-main"
+    model: "gpt-4o"
+    temperature: 0.3
+    thinking_level: "high"
+    tools:
+      - read_file
+      - list_directory
+      - save_memory
+      - recall_memory
+  
+  - name: "local-assistant"
+    role_description: "General assistant using local LLM"
+    system_prompt: "You are a helpful assistant running locally."
+    provider: "llamacpp-local"
+    model: "qwen2.5-coder-7b"
+    temperature: 0.7
+    thinking_level: "off"
+    tools:
+      - read_file
+      - write_file
+      - list_directory
+
+hives:
+  # Each hive references bees by name and supervisor provider by alias
+  - name: "dev-team"
+    goal_description: "Full-stack development team for building features"
+    supervisor_provider: "openai-main"     # References provider alias
+    supervisor_model: "gpt-4o"
+    supervisor_prompt: |
+      You are a senior engineering lead. Coordinate the team to deliver features.
+      Delegate to specialists and synthesize their work.
+    supervisor_thinking_level: "medium"
+    is_dynamic: false
+    project_path: "projects/my-app"        # Optional file/artifact root; relative to the current working directory
+    bees:                                  # List of bee names to include
+      - "coder"
+      - "reviewer"
+      - "planner"
+  
+  - name: "local-dev"
+    goal_description: "Local-only development with llama.cpp"
+    supervisor_provider: "llamacpp-local"
+    supervisor_model: "qwen2.5-coder-7b"
+    supervisor_thinking_level: "low"
+    is_dynamic: false
+    bees:
+      - "local-assistant"
+
+# Optional: memory entries to pre-populate
+memory:
+  - namespace: "global"
+    key: "coding-standards"
+    content: |
+      - Use type hints in Python
+      - Write tests for new features
+      - Follow PEP 8 style guide
+      - Use meaningful variable names
+  
+  - namespace: "hive:dev-team"
+    key: "architecture"
+    content: |
+      Replace this example with facts about the target project's architecture,
+      technology stack, deployment model, and constraints.
+
+# Optional: skills to pre-register
+skills:
+  - name: "refactor-python"
+    description: "Refactor Python code for readability and performance"
+    instructions: |
+      # Refactor Python Code Skill
+      
+      When asked to refactor Python code:
+      1. Analyze the current code for code smells
+      2. Apply appropriate refactoring patterns
+      3. Ensure tests still pass
+      4. Add type hints if missing
+    tags:
+      - python
+      - refactoring
+      - code-quality
+    bees:
+      - "coder"
+      - "reviewer"
+  
+  - name: "write-unit-tests"
+    description: "Write comprehensive unit tests for Python functions"
+    instructions: |
+      # Write Unit Tests Skill
+      
+      When writing unit tests:
+      1. Use pytest framework
+      2. Cover happy path and edge cases
+      3. Mock external dependencies
+      4. Aim for >80% coverage
+    tags:
+      - python
+      - testing
+      - pytest
+    bees:
+      - "coder"
+      - "planner"
+# Default assistant configuration (optional)
+# Defines the special assistant Bee used for interactive assistant chat.
+# Headless runs use an explicitly named Hive or the root command's one-off path.
+# References one of the defined providers above and a model from that provider
+assistant:
+  provider: "openai-main"        # References provider alias from above
+  model: "gpt-4o"                # Model from that provider
+  temperature: 0.7
+  thinking_level: "off"          # off | low | medium | high
+  tools:                         # Comma-separated or list
+    - read_file
+    - write_file
+    - list_directory
+    - run_python_calc
+    - save_memory
+    - recall_memory

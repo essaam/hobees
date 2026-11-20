@@ -1,0 +1,17 @@
+.venv/
+__pycache__/
+*.pyc
+.env*
+.hobees/
+*.egg-info/
+build/
+dist/
+
+# Local runtime databases
+*.db
+*.db-journal
+
+# Local runtime outputs and synced skill files
+artifacts/
+skills/
+
