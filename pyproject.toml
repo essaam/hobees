@@ -1,0 +1,61 @@
+[project]
+name = "hobees"
+version = "0.1.0a1"
+description = "A CLI for creating and running teams of AI agents, with interactive shell, TUI, and repeatable headless workflows."
+requires-python = ">=3.11"
+readme = "README.md"
+authors = [{ name = "Hessam Moussavinik" }]
+license = "Apache-2.0"
+license-files = ["LICENSE"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Environment :: Console",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: Apache Software License",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
+
+dependencies = [
+    "typer[all]>=0.12",
+    "rich>=13.9",
+    "prompt-toolkit>=3.0",
+    "sqlalchemy>=2.0",
+    "psycopg[binary]>=3.2",
+    "psycopg-pool>=3.2",
+    "pydantic-settings>=2.3",
+    "python-dotenv>=1.0",
+    "langgraph>=1.0",
+    "langgraph-checkpoint-postgres>=0.0.1",
+    "langchain-core>=0.3",
+    "langchain>=1.0",
+    "langchain-openai>=0.2",
+    "langchain-anthropic>=0.2",
+    "langchain-google-genai>=1.0",
+    "fastapi>=0.111",
+    "uvicorn[standard]>=0.30",
+    "pyyaml>=6.0",
+    "langgraph-checkpoint-sqlite>=2.0.0",
+]
+
+[project.urls]
+Homepage = "https://github.com/essaam/hobees"
+Repository = "https://github.com/essaam/hobees"
+Issues = "https://github.com/essaam/hobees/issues"
+
+[project.scripts]
+hobees = "hobees.cli.main:main"
+hobiz = "hobees.cli.main:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/hobees"]
+
+[dependency-groups]
+dev = ["pytest>=8.0"]

@@ -1,0 +1,67 @@
+name: Release
+
+on:
+  push:
+    branches:
+      - release
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: astral-sh/setup-uv@v6
+        with:
+          python-version: "3.12"
+
+      - name: Check branch and version
+        run: |
+          python - <<'PY'
+          import os
+          import tomllib
+
+          with open("pyproject.toml", "rb") as project_file:
+              version = tomllib.load(project_file)["project"]["version"]
+
+          ref_name = os.environ["GITHUB_REF_NAME"]
+          if ref_name != "release":
+              raise SystemExit(f"Expected branch 'release', got {ref_name}")
+
+          if not version:
+              raise SystemExit("Missing project.version in pyproject.toml")
+          PY
+
+      - run: uv sync --locked --group dev
+      - name: Test
+        env:
+          HOBEES_DATABASE_URL: sqlite:////tmp/hobees_test.db
+        run: uv run --locked pytest
+
+      - name: Build package
+        run: uv build
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: python-package-distributions
+          path: dist/
+          if-no-files-found: error
+
+  publish:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: pypi
+      url: https://pypi.org/p/hobees
+    permissions:
+      id-token: write
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          name: python-package-distributions
+          path: dist/
+
+      - uses: pypa/gh-action-pypi-publish@release/v1
