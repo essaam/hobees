@@ -1,6 +1,6 @@
 [project]
 name = "hobees"
-version = "0.1.0a1"
+version = "0.1.0a2"
 description = "A CLI for creating and running teams of AI agents, with interactive shell, TUI, and repeatable headless workflows."
 requires-python = ">=3.11"
 readme = "README.md"

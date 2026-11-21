@@ -15,6 +15,7 @@ from prompt_toolkit.layout import Layout, Window, HSplit, VSplit, Float, FloatCo
 from prompt_toolkit.layout.controls import FormattedTextControl
 from prompt_toolkit.layout.menus import CompletionsMenu
 from prompt_toolkit.lexers import Lexer
+from prompt_toolkit.output import Output
 from prompt_toolkit.widgets import TextArea
 from prompt_toolkit.styles import Style
 from prompt_toolkit.patch_stdout import patch_stdout
@@ -1814,13 +1815,14 @@ class HobeesTUI:
         with patch_stdout():
             self.app.run()
 
-    def _create_application(self) -> Application:
+    def _create_application(self, output: Output | None = None) -> Application:
         """Create a TUI app while leaving mouse selection to the terminal."""
         return Application(
             layout=self.layout,
             key_bindings=self.kb,
             style=self.style,
             full_screen=True,
+            output=output,
             # Let the terminal handle drag-to-select and its native clipboard.
             mouse_support=False,
         )
