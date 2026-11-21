@@ -6,6 +6,7 @@ from unittest.mock import patch
 import hobees.cli.tui as tui_module
 from hobees.cli.tui import HobeesTUI
 from hobees.cli.hive_cmd import get_hive_artifacts_dir
+from prompt_toolkit.output import DummyOutput
 
 
 def test_tui_renders_warning_and_success_output():
@@ -26,7 +27,7 @@ def test_tui_renders_warning_and_success_output():
 
 def test_tui_leaves_mouse_selection_available_to_terminal():
     tui = HobeesTUI()
-    app = tui._create_application()
+    app = tui._create_application(output=DummyOutput())
 
     assert not app.mouse_support()
     assert tui.output_area.control.is_focusable()

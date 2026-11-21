@@ -44,7 +44,7 @@ def truncate_tool_output(
     scratch_file = scratch_dir / f"{call_id}.txt"
     scratch_file.write_text(output, encoding="utf-8")
     display_path = (
-        Path("scratchpad") / thread_id / scratch_file.name
+        (Path("scratchpad") / thread_id / scratch_file.name).as_posix()
         if scratchpad_root
         else scratch_file
     )

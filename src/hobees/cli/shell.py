@@ -169,6 +169,45 @@ def _get_checkpointer(db_url):
     return saver, connection
 
 
+async def _get_async_checkpointer(db_url):
+    """Open an async-compatible checkpointer and return its resource stack."""
+    from contextlib import AsyncExitStack
+
+    from hobees.db.backends import get_database_backend, get_postgres_checkpoint_url
+
+    stack = AsyncExitStack()
+    try:
+        if get_database_backend(db_url) == "sqlite":
+            from sqlalchemy.engine import make_url
+
+            sqlite_path = make_url(db_url).database
+            if not sqlite_path or sqlite_path == ":memory:":
+                from langgraph.checkpoint.memory import MemorySaver
+
+                saver = MemorySaver()
+            else:
+                from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
+
+                saver = await stack.enter_async_context(
+                    AsyncSqliteSaver.from_conn_string(sqlite_path)
+                )
+                await saver.setup()
+        else:
+            from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
+
+            saver = await stack.enter_async_context(
+                AsyncPostgresSaver.from_conn_string(
+                    get_postgres_checkpoint_url(db_url)
+                )
+            )
+            await saver.setup()
+    except BaseException:
+        await stack.aclose()
+        raise
+
+    return saver, stack
+
+
 # -- Helper functions -----------------------------------------------------
 
 def _ensure_default_assistant(provider: LLMProvider, db_url: str) -> Bee | None:
@@ -1244,15 +1283,18 @@ async def _chat_with_bee(bee_name: str, provider: LLMProvider, db_url: str, shel
 
     from langchain.agents import create_agent
 
-    saver, checkpoint_connection = _get_checkpointer(db_url)
-
-    agent = create_agent(
-        model=model,
-        tools=tools,
-        system_prompt=full_system_prompt,
-        name=bee.name,
-        checkpointer=saver,
-    )
+    saver, checkpoint_stack = await _get_async_checkpointer(db_url)
+    try:
+        agent = create_agent(
+            model=model,
+            tools=tools,
+            system_prompt=full_system_prompt,
+            name=bee.name,
+            checkpointer=saver,
+        )
+    except BaseException:
+        await checkpoint_stack.aclose()
+        raise
 
     console.print(f"[bold]Chatting with {BEE} {bee.name}[/bold] (type 'exit' to return)")
 
@@ -1338,8 +1380,7 @@ async def _chat_with_bee(bee_name: str, provider: LLMProvider, db_url: str, shel
     except Exception as exc:
         console.print(f"{ERROR} Error: {exc}")
     finally:
-        if checkpoint_connection:
-            checkpoint_connection.close()
+        await checkpoint_stack.aclose()
 
 
 async def _chat_with_hive(
@@ -1619,30 +1660,45 @@ async def _stdin_escape_listener(cancel_flag: dict) -> None:
     """
     import sys
     import threading
-    import termios
-    import tty
-    import select
     import asyncio
 
     if not sys.stdin.isatty():
         return
 
+    is_windows = sys.platform == "win32"
+    if is_windows:
+        import msvcrt
+    else:
+        import select
+        import termios
+        import tty
+
     stop_event = threading.Event()
-    fd = sys.stdin.fileno()
-    old_settings = termios.tcgetattr(fd)
+    if not is_windows:
+        fd = sys.stdin.fileno()
+        old_settings = termios.tcgetattr(fd)
 
     def reader_thread():
         try:
-            tty.setcbreak(fd)
+            if not is_windows:
+                tty.setcbreak(fd)
             while not stop_event.is_set() and not cancel_flag.get("cancelled"):
-                ready, _, _ = select.select([fd], [], [], 0.1)
-                if ready:
+                if is_windows:
+                    if not msvcrt.kbhit():
+                        stop_event.wait(0.1)
+                        continue
+                    ch = msvcrt.getwch()
+                else:
+                    ready, _, _ = select.select([fd], [], [], 0.1)
+                    if not ready:
+                        continue
                     ch = sys.stdin.read(1)
-                    if ch == "\x1b":  # Escape key
-                        cancel_flag["cancelled"] = True
-                        break
+                if ch == "\x1b":  # Escape key
+                    cancel_flag["cancelled"] = True
+                    break
         finally:
-            termios.tcsetattr(fd, termios.TCSADRAIN, old_settings)
+            if not is_windows:
+                termios.tcsetattr(fd, termios.TCSADRAIN, old_settings)
 
     thread = threading.Thread(target=reader_thread, daemon=True)
     thread.start()
@@ -2021,15 +2077,18 @@ You are the hobees assistant. You know the hobees system inside out:
 
     full_system_prompt = "\n\n".join(system_prompt_parts) if system_prompt_parts else None
 
-    saver, checkpoint_connection = _get_checkpointer(db_url)
-
-    agent = create_agent(
-        model=model,
-        tools=tools,
-        system_prompt=full_system_prompt,
-        name=assistant.name,
-        checkpointer=saver,
-    )
+    saver, checkpoint_stack = await _get_async_checkpointer(db_url)
+    try:
+        agent = create_agent(
+            model=model,
+            tools=tools,
+            system_prompt=full_system_prompt,
+            name=assistant.name,
+            checkpointer=saver,
+        )
+    except BaseException:
+        await checkpoint_stack.aclose()
+        raise
 
     # Streaming with thoughts panel
     thoughts_buffer = []  # Last 4 thought lines
@@ -2141,8 +2200,7 @@ You are the hobees assistant. You know the hobees system inside out:
     except Exception as exc:
             console.print(f"\n{ERROR} Error: {exc}")
     finally:
-        if checkpoint_connection:
-            checkpoint_connection.close()
+        await checkpoint_stack.aclose()
 
 
 __all__ = ["_shell_loop"]

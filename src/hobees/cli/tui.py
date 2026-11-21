@@ -15,6 +15,7 @@ from prompt_toolkit.layout import Layout, Window, HSplit, VSplit, Float, FloatCo
 from prompt_toolkit.layout.controls import FormattedTextControl
 from prompt_toolkit.layout.menus import CompletionsMenu
 from prompt_toolkit.lexers import Lexer
+from prompt_toolkit.output import Output
 from prompt_toolkit.widgets import TextArea
 from prompt_toolkit.styles import Style
 from prompt_toolkit.patch_stdout import patch_stdout
@@ -1207,25 +1208,27 @@ class HobeesTUI:
 
         full_system_prompt = "\n\n".join(system_prompt_parts) if system_prompt_parts else None
 
-        from hobees.cli.shell import _get_checkpointer
-        saver, checkpoint_connection = _get_checkpointer(self.state.db_url)
-
-        agent = create_agent(
-            model=model,
-            tools=tools,
-            system_prompt=full_system_prompt,
-            name=assistant.name,
-            checkpointer=saver,
-        )
-
-        self._add_output("user", user_input)
-
+        from hobees.cli.shell import _get_async_checkpointer
+        saver, checkpoint_stack = await _get_async_checkpointer(self.state.db_url)
         try:
-            streamer = DeltaStreamer()
-            await self._stream_into_buffer(streamer, agent, user_input, thread_id)
-        except Exception as e:
-            self._add_output("error", f"Error: {e}")
-            return
+            agent = create_agent(
+                model=model,
+                tools=tools,
+                system_prompt=full_system_prompt,
+                name=assistant.name,
+                checkpointer=saver,
+            )
+
+            self._add_output("user", user_input)
+
+            try:
+                streamer = DeltaStreamer()
+                await self._stream_into_buffer(streamer, agent, user_input, thread_id)
+            except Exception as e:
+                self._add_output("error", f"Error: {e}")
+                return
+        finally:
+            await checkpoint_stack.aclose()
         
         # Show telemetry footer
         from hobees.db.analytics import run_thread_usage
@@ -1237,8 +1240,6 @@ class HobeesTUI:
             cost = usage.get('estimated_cost_usd', 0) or 0.0
             self._add_output("telemetry", f"tokens: {in_toks:,} in / {out_toks:,} out • ${cost:.4f} • {events} calls")
         
-        if checkpoint_connection:
-            checkpoint_connection.close()
         
     async def _list_chat_targets(self):
         """List available bees and hives for chat."""
@@ -1458,21 +1459,24 @@ class HobeesTUI:
             
         full_system_prompt = "\n\n".join(system_prompt_parts) if system_prompt_parts else None
         
-        from hobees.cli.shell import _get_checkpointer
-        saver, checkpoint_connection = _get_checkpointer(self.state.db_url)
-        
-        agent = create_agent(
-            model=model,
-            tools=tools,
-            system_prompt=full_system_prompt,
-            name=bee.name,
-            checkpointer=saver,
-        )
+        from hobees.cli.shell import _get_async_checkpointer
+        saver, checkpoint_stack = await _get_async_checkpointer(self.state.db_url)
+        try:
+            agent = create_agent(
+                model=model,
+                tools=tools,
+                system_prompt=full_system_prompt,
+                name=bee.name,
+                checkpointer=saver,
+            )
+        except BaseException:
+            await checkpoint_stack.aclose()
+            raise
         
         self.state.chat_mode = True
         self.state.chat_target = f"{BEE} {bee.name}"
         self.state.chat_agent = agent
-        self.state.chat_checkpointer = (saver, checkpoint_connection)
+        self.state.chat_checkpointer = (saver, checkpoint_stack)
         
         self._add_output("system", f"Started chat with {BEE} {bee.name} (type 'exit' to return)")
         self.app.invalidate()
@@ -1638,9 +1642,8 @@ class HobeesTUI:
             EventBroker.get_instance().unsubscribe(self._comms_queue)
         
         if self.state.chat_checkpointer:
-            saver, checkpoint_connection = self.state.chat_checkpointer
-            if checkpoint_connection:
-                checkpoint_connection.close()
+            _saver, checkpoint_stack = self.state.chat_checkpointer
+            await checkpoint_stack.aclose()
                 
         self.state.chat_mode = False
         self.state.chat_target = None
@@ -1812,13 +1815,14 @@ class HobeesTUI:
         with patch_stdout():
             self.app.run()
 
-    def _create_application(self) -> Application:
+    def _create_application(self, output: Output | None = None) -> Application:
         """Create a TUI app while leaving mouse selection to the terminal."""
         return Application(
             layout=self.layout,
             key_bindings=self.kb,
             style=self.style,
             full_screen=True,
+            output=output,
             # Let the terminal handle drag-to-select and its native clipboard.
             mouse_support=False,
         )

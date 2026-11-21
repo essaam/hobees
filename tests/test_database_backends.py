@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 import uuid
@@ -8,12 +9,13 @@ from typing import TypedDict
 import pytest
 from langgraph.checkpoint.memory import MemorySaver
 from langgraph.checkpoint.sqlite import SqliteSaver
+from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
 from langgraph.graph import END, START, StateGraph
 from sqlalchemy import create_engine, inspect, text
 from sqlalchemy.engine import make_url
 
 from hobees.cli.main import _run_migrations
-from hobees.cli.shell import _get_checkpointer
+from hobees.cli.shell import _get_async_checkpointer, _get_checkpointer
 from hobees.db.backends import get_database_backend, get_postgres_checkpoint_url
 
 
@@ -97,6 +99,30 @@ def test_file_sqlite_chat_checkpoints_persist_between_connections(tmp_path):
         connection.close()
 
     assert isinstance(saver, SqliteSaver)
+    assert state.values == {"value": "saved"}
+
+
+def test_file_sqlite_async_chat_checkpointer_streams_and_persists(tmp_path):
+    db_url = f"sqlite:///{tmp_path / 'async-chat-checkpoints.sqlite'}"
+    config = {"configurable": {"thread_id": "persistent-async-chat"}}
+
+    async def verify_async_checkpointer():
+        saver, stack = await _get_async_checkpointer(db_url)
+        try:
+            await _checkpoint_graph(saver).ainvoke({"value": "saved"}, config=config)
+        finally:
+            await stack.aclose()
+
+        saver, stack = await _get_async_checkpointer(db_url)
+        try:
+            state = await _checkpoint_graph(saver).aget_state(config)
+        finally:
+            await stack.aclose()
+        return saver, state
+
+    saver, state = asyncio.run(verify_async_checkpointer())
+
+    assert isinstance(saver, AsyncSqliteSaver)
     assert state.values == {"value": "saved"}
 
 
