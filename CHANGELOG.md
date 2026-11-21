@@ -4,6 +4,13 @@ Notable project changes are recorded here. The package version is defined in
 `pyproject.toml`. Before a release, move the relevant entries from **Unreleased**
 to a heading matching that version and add the release date.
 
+## 0.1.0a3 - 2026-11-21
+
+### Fixed
+
+- In local use, if no SQLite DB URL is predefined a default DB will be created.
+- DB table gets initialised automatically.
+
 ## 0.1.0a2 - 2026-11-21
 
 ### Fixed
