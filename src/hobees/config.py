@@ -16,13 +16,39 @@ Settings:
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 from typing import Literal
 
+from dotenv import dotenv_values
 from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
+from sqlalchemy.engine import URL
 
 _CONFIG_DIR = Path.home() / ".hobees"
+_LEGACY_DEFAULT_DATABASE_URL = "sqlite:///hobees.db"
+
+
+def get_default_database_path() -> Path:
+    return _CONFIG_DIR / "hobees.db"
+
+
+def _default_database_url() -> str:
+    return URL.create(
+        "sqlite",
+        database=str(get_default_database_path()),
+    ).render_as_string(hide_password=False)
+
+
+def _has_higher_priority_database_url() -> bool:
+    if "HOBEES_DATABASE_URL" in os.environ:
+        return True
+
+    project_env = Path.cwd() / ".env"
+    return (
+        project_env.is_file()
+        and "HOBEES_DATABASE_URL" in dotenv_values(project_env)
+    )
 
 
 class Settings(BaseSettings):
@@ -57,4 +83,30 @@ class Settings(BaseSettings):
 
 settings = Settings()
 
-__all__ = ["Settings", "settings"]
+
+def ensure_database_url() -> bool:
+    """Persist the local SQLite default when no database URL was configured."""
+    env_path = _CONFIG_DIR / ".env"
+    legacy_default = (
+        settings.database_url == _LEGACY_DEFAULT_DATABASE_URL
+        and not _has_higher_priority_database_url()
+        and env_path.is_file()
+        and dotenv_values(env_path).get("HOBEES_DATABASE_URL")
+        == _LEGACY_DEFAULT_DATABASE_URL
+    )
+    if settings.database_url and not legacy_default:
+        return False
+
+    env_path.parent.mkdir(parents=True, exist_ok=True)
+    existing = env_path.read_text(encoding="utf-8") if env_path.exists() else ""
+    with env_path.open("a", encoding="utf-8") as env_file:
+        if existing and not existing.endswith(("\n", "\r")):
+            env_file.write("\n")
+        database_url = _default_database_url()
+        env_file.write(f"HOBEES_DATABASE_URL={database_url}\n")
+
+    settings.database_url = database_url
+    return True
+
+
+__all__ = ["Settings", "ensure_database_url", "get_default_database_path", "settings"]
