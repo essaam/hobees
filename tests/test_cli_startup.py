@@ -1,3 +1,5 @@
+import asyncio
+import sys
 from types import SimpleNamespace
 from unittest.mock import Mock
 
@@ -58,3 +60,15 @@ def test_shell_routes_unprefixed_input_to_active_hive(monkeypatch):
         state,
         "implement feature",
     )
+
+
+def test_stdin_escape_listener_uses_msvcrt_on_windows(monkeypatch):
+    msvcrt = SimpleNamespace(kbhit=lambda: True, getwch=lambda: "\x1b")
+    monkeypatch.setattr(sys, "platform", "win32")
+    monkeypatch.setattr(sys, "stdin", SimpleNamespace(isatty=lambda: True))
+    monkeypatch.setitem(sys.modules, "msvcrt", msvcrt)
+    cancel_flag = {"cancelled": False}
+
+    asyncio.run(shell._stdin_escape_listener(cancel_flag))
+
+    assert cancel_flag["cancelled"] is True
