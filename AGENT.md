@@ -23,12 +23,15 @@ cp .env.example .env
 uv run hobees init
 ```
 
-Choose the database by setting `HOBEES_DATABASE_URL` in `.env`; there is no
-interactive chooser. Use `sqlite:///./hobees.db` for local, single-user use or
+Hobees defaults to `~/.hobees/hobees.db` for local, single-user use and writes
+the platform-specific SQLite URL to `~/.hobees/.env` if no database URL is
+configured. The interactive shell initializes a fresh database automatically.
+Use `uv run hobees init` to initialize it explicitly before other
+database-backed commands or to run migrations. To choose a different database, set
+`HOBEES_DATABASE_URL` in `.env`; use
 `postgresql+psycopg://user:password@localhost:5432/hobees` for PostgreSQL and
-multi-process use. Run `uv run hobees init` after choosing. The same URL is
-used for application data and LangGraph checkpoints. Changing the URL does not
-copy existing data to the other database.
+multi-process use. The same URL is used for application data and LangGraph
+checkpoints. Changing the URL does not copy existing data to the other database.
 
 SQLite file paths are relative to the process working directory. File-backed
 SQLite persists checkpoints; `sqlite:///:memory:` is temporary. Do not use

@@ -23,8 +23,11 @@ def test_root_auto_syncs_config_before_subcommand(monkeypatch, tmp_path):
 
 
 def test_root_does_not_auto_sync_for_init(monkeypatch, tmp_path):
+    from hobees import config
+
     config_path = tmp_path / "hobees.json"
-    monkeypatch.setattr("hobees.config.settings.config_path", config_path)
+    monkeypatch.setattr(config.settings, "config_path", config_path)
+    monkeypatch.setattr(config.settings, "database_url", "sqlite:///:memory:")
     sync = Mock()
     monkeypatch.setattr(main, "_sync_startup_config", sync)
     context = SimpleNamespace(
@@ -35,6 +38,93 @@ def test_root_does_not_auto_sync_for_init(monkeypatch, tmp_path):
     main._root(context)
 
     sync.assert_not_called()
+
+
+def test_root_creates_default_database_url_when_unconfigured(monkeypatch, tmp_path, capsys):
+    from sqlalchemy import create_engine
+    from sqlalchemy.engine import make_url
+
+    from hobees import config
+
+    config_dir = tmp_path / ".hobees"
+    monkeypatch.setattr(config, "_CONFIG_DIR", config_dir)
+    monkeypatch.setattr(config.settings, "database_url", None)
+    context = SimpleNamespace(resilient_parsing=False, invoked_subcommand="init")
+
+    main._root(context)
+
+    note = capsys.readouterr().out
+    assert ".hobees" in note
+    assert "hobees.db" in note
+    assert make_url(config.settings.database_url).database == str(
+        config_dir / "hobees.db"
+    )
+    assert (config_dir / ".env").read_text(encoding="utf-8") == (
+        f"HOBEES_DATABASE_URL={config.settings.database_url}\n"
+    )
+    engine = create_engine(config.settings.database_url)
+    try:
+        with engine.connect():
+            pass
+    finally:
+        engine.dispose()
+    assert (config_dir / "hobees.db").is_file()
+
+
+def test_root_upgrades_legacy_default_database_url(monkeypatch, tmp_path, capsys):
+    from sqlalchemy.engine import make_url
+
+    from hobees import config
+
+    config_dir = tmp_path / ".hobees"
+    config_dir.mkdir()
+    (config_dir / ".env").write_text(
+        "HOBEES_DATABASE_URL=sqlite:///hobees.db\n", encoding="utf-8"
+    )
+    monkeypatch.setattr(config, "_CONFIG_DIR", config_dir)
+    monkeypatch.setattr(config.settings, "database_url", "sqlite:///hobees.db")
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.delenv("HOBEES_DATABASE_URL", raising=False)
+    context = SimpleNamespace(resilient_parsing=False, invoked_subcommand="init")
+
+    main._root(context)
+
+    assert make_url(config.settings.database_url).database == str(
+        config_dir / "hobees.db"
+    )
+    note = capsys.readouterr().out
+    assert ".hobees" in note
+    assert "hobees.db" in note
+
+
+def test_root_preserves_configured_database_url(monkeypatch, tmp_path):
+    from hobees import config
+
+    env_path = tmp_path / ".hobees" / ".env"
+    env_path.parent.mkdir()
+    env_path.write_text("HOBEES_DATABASE_URL=postgresql://db/hobees\n", encoding="utf-8")
+    monkeypatch.setattr(config, "_CONFIG_DIR", tmp_path / ".hobees")
+    monkeypatch.setattr(config.settings, "database_url", "postgresql://db/hobees")
+    context = SimpleNamespace(resilient_parsing=False, invoked_subcommand="init")
+
+    main._root(context)
+
+    assert config.settings.database_url == "postgresql://db/hobees"
+    assert env_path.read_text(encoding="utf-8") == "HOBEES_DATABASE_URL=postgresql://db/hobees\n"
+
+
+def test_ensure_database_initialized_creates_schema_for_empty_database():
+    from sqlalchemy import create_engine, inspect
+
+    from hobees.cli.main import _ensure_database_initialized
+
+    engine = create_engine("sqlite:///:memory:")
+    try:
+        _ensure_database_initialized(engine)
+
+        assert "llm_providers" in inspect(engine).get_table_names()
+    finally:
+        engine.dispose()
 
 
 def test_shell_routes_unprefixed_input_to_active_hive(monkeypatch):

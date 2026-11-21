@@ -20,16 +20,17 @@ uv run hobees
 ### First Run
 
 ```bash
-# 1. Configure a database
+# 1. Optionally configure a database
 mkdir -p ~/.hobees
 cp .env.example ~/.hobees/.env
-# Choose SQLite or PostgreSQL by setting HOBEES_DATABASE_URL in ~/.hobees/.env.
+# Set HOBEES_DATABASE_URL in ~/.hobees/.env to choose a database.
+# Without it, Hobees uses local SQLite by default.
 # Export any provider API key named by api_key_env, e.g. OPENAI_API_KEY.
 
-# 2. Initialize database tables
+# 2. Optionally initialize explicitly
 hobees init
 
-# 3. Enter the interactive subshell
+# 3. Enter the interactive subshell (initializes a fresh database automatically)
 hobees
 🍯 hobees > /provider add          # Register an LLM provider
 🍯 hobees > /bee create            # Create a Worker Bee
@@ -300,9 +301,18 @@ Application settings are loaded from `~/.hobees/.env` (or local `.env`) with the
 
 ### Choosing SQLite or PostgreSQL
 
-Set `HOBEES_DATABASE_URL` in `~/.hobees/.env` or the project `.env`. This URL
-selects the database for both Hobees application data and LangGraph checkpoints;
-there is no interactive database chooser.
+Set `HOBEES_DATABASE_URL` in `~/.hobees/.env`, the project `.env`, or the
+process environment to select the database for both Hobees application data and
+LangGraph checkpoints; there is no interactive database chooser. If no URL is
+configured, Hobees writes a platform-specific SQLite URL pointing to
+`~/.hobees/hobees.db` into `~/.hobees/.env` and prints the database file
+location in the CLI. Both paths use the current user's home directory on Linux,
+macOS, and Windows.
+
+The interactive shell initializes a fresh database automatically, so
+`hobees init` is not required just to start the shell. Use `hobees init` to
+initialize the database explicitly before other database-backed commands, or
+to run migrations and configuration import.
 
 For a local, single-user setup, use file-backed SQLite:
 
@@ -311,14 +321,19 @@ For a local, single-user setup, use file-backed SQLite:
 HOBEES_DATABASE_URL=sqlite:///./hobees.db
 ```
 
+Without an explicit URL, Hobees stores the default database under the user's
+`.hobees` directory. You can configure another SQLite path or PostgreSQL URL
+explicitly.
+
 ```bash
 uv run hobees init
 ```
 
-The relative SQLite path is resolved from the working directory where Hobees
-runs. Use an absolute SQLite URL if commands will run from different
-directories. File-backed SQLite keeps data and checkpoints between runs;
-`sqlite:///:memory:` is temporary and is not suitable for persistent use.
+Relative SQLite paths that you configure yourself are resolved from the
+working directory where Hobees runs. The default database location is stable
+across working directories. File-backed SQLite keeps data and checkpoints
+between runs; `sqlite:///:memory:` is temporary and is not suitable for
+persistent use.
 SQLite is intended for local/single-user use and does not provide PostgreSQL's
 concurrent multi-process behavior.
 
