@@ -15,6 +15,7 @@ from typing import Annotated
 
 import typer
 from rich.console import Console
+from rich.markup import escape
 from rich.table import Table
 
 from hobees.cli.icons import APP, ERROR, SUCCESS, WARN
@@ -74,10 +75,18 @@ def _root(
     ),
 ) -> None:
     """hobees — run with no arguments to enter the interactive shell."""
-    if not ctx.resilient_parsing and ctx.invoked_subcommand not in ("init", "import"):
-        from hobees.config import settings
+    if not ctx.resilient_parsing:
+        from hobees.config import ensure_database_url, get_default_database_path, settings
 
-        if settings.config_path:
+        if ensure_database_url():
+            database_path = escape(str(get_default_database_path()))
+            console.print(
+                f"{WARN} HOBEES_DATABASE_URL is not set; using local SQLite "
+                f"database at {database_path}. "
+                "Set HOBEES_DATABASE_URL to use another database."
+            )
+
+        if ctx.invoked_subcommand not in ("init", "import") and settings.config_path:
             _sync_startup_config(settings.config_path)
 
     # If no subcommand was invoked, run the shell
@@ -92,10 +101,11 @@ def _root(
         }
         from hobees.db.session import get_engine, session_scope
         from hobees.db.models import LLMProvider
-        
+
+        engine = get_engine()
+        _ensure_database_initialized(engine)
         with session_scope() as session:
             providers = session.query(LLMProvider).all()
-            engine = get_engine()
             db_url = engine.url
             
         selected_provider = None
@@ -232,6 +242,21 @@ def _run_migrations(engine) -> None:
     # These will be created by Base.metadata.create_all() anyway
 
 
+def _ensure_database_initialized(engine) -> None:
+    """Create the initial schema when the database has not been initialized."""
+    from sqlalchemy import inspect
+
+    if "llm_providers" in inspect(engine).get_table_names():
+        return
+
+    from hobees.db.models import Base
+
+    Base.metadata.create_all(engine)
+    _run_migrations(engine)
+    _setup_postgres_checkpointer(engine.url)
+    console.print(f"{SUCCESS} Database schema initialized.")
+
+
 def _sync_startup_config(config_path: Path) -> None:
     """Create the schema and reconcile the configured resources before a command runs."""
     from hobees.db.session import get_engine
@@ -284,9 +309,10 @@ def init(
     """Create database tables and optionally auto-import config.
 
     Creates the SQLAlchemy schema and initializes PostgreSQL checkpoints when
-    applicable. Configure HOBEES_DATABASE_URL in ~/.hobees/.env or .env.
-    PostgreSQL is recommended; SQLite is supported for local use. Also runs
-    migrations for existing databases and imports config if specified.
+    applicable. If HOBEES_DATABASE_URL is not configured, local SQLite is
+    selected automatically. PostgreSQL is recommended for multi-process use;
+    SQLite is supported for local use. Also runs migrations for existing
+    databases and imports config if specified.
     """
     from hobees.db.session import get_engine
     from hobees.db.models import Base
