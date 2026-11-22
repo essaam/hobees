@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import sys
 import uuid
+from collections.abc import Sequence
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Annotated
@@ -107,7 +108,13 @@ def _root(
         with session_scope() as session:
             providers = session.query(LLMProvider).all()
             db_url = engine.url
-            
+
+        # First-launch detection is one-time; users can rerun it explicitly later.
+        if _run_provider_detection_if_needed(providers):
+            # Re-query after potential registration
+            with session_scope() as session:
+                providers = session.query(LLMProvider).all()
+
         selected_provider = None
         if provider:
             # User specified a provider via --provider
@@ -242,6 +249,105 @@ def _run_migrations(engine) -> None:
     # These will be created by Base.metadata.create_all() anyway
 
 
+def _run_provider_detection() -> None:
+    """Scan env + local ports, then offer to register detected providers.
+
+    After running (whether or not any providers are found), the sentinel file
+    ``~/.hobees/.detected`` records that automatic first-launch detection ran.
+    This function is also used by the explicit CLI and shell commands.
+    """
+    from rich.prompt import Confirm
+    from rich.table import Table as RichTable
+
+    from hobees.core.provider_detector import (
+        auto_register_providers,
+        detect_available_providers,
+        get_registered_provider_aliases,
+        mark_detected,
+    )
+
+    console.print(f"\n{APP} Scanning your environment for available providers...\n")
+
+    candidates = detect_available_providers()
+
+    if not candidates:
+        console.print(f"{WARN} No providers detected automatically.")
+        console.print(
+            "  To get started:\n"
+            "    • Cloud: set OPENAI_API_KEY / ANTHROPIC_API_KEY / GEMINI_API_KEY, then rerun.\n"
+            "    • Local (free): install [link=https://ollama.com]Ollama[/link] or llama-server, then rerun.\n"
+            f"    • Manual: run [bold]hobees provider add[/bold]\n"
+            f"    • Template: run [bold]hobees init --template local-ollama[/bold]\n"
+        )
+        mark_detected()
+        return
+
+    registered_aliases = get_registered_provider_aliases()
+    already_registered = [c for c in candidates if c["alias"] in registered_aliases]
+    candidates = [c for c in candidates if c["alias"] not in registered_aliases]
+
+    if already_registered:
+        aliases = ", ".join(c["alias"] for c in already_registered)
+        console.print(f"{WARN} Already registered; skipping: {aliases}")
+
+    if not candidates:
+        console.print(f"{SUCCESS} All detected providers are already registered. No changes made.")
+        mark_detected()
+        return
+
+    tbl = RichTable(title="Detected Providers", show_lines=False)
+    tbl.add_column("Alias", style="cyan", no_wrap=True)
+    tbl.add_column("Type")
+    tbl.add_column("Source", style="dim")
+    for c in candidates:
+        tbl.add_row(c["alias"], c["provider_type"], c.get("source_label", ""))
+    console.print(tbl)
+
+    # In non-interactive (CI) mode, skip the prompt and auto-register
+    is_interactive = sys.stdin.isatty()
+    do_register = True
+    if is_interactive:
+        do_register = Confirm.ask("\nRegister these providers now?", default=True)
+
+    if do_register:
+        registered = auto_register_providers(candidates)
+        if registered:
+            console.print(f"\n{SUCCESS} Registered: {', '.join(registered)}")
+            console.print(
+                f"\n{APP} [dim]Tip: scaffold a hive with "
+                f"[bold]hobees init --template code-review[/bold][/dim]"
+            )
+        else:
+            console.print(f"{WARN} No new providers registered (all already exist).")
+    else:
+        console.print("Skipped. Run [bold]hobees provider add[/bold] to add providers manually.")
+
+    mark_detected()
+
+
+def _run_provider_detection_if_needed(providers: Sequence[object]) -> bool:
+    """Run automatic detection on an empty registry, once per user profile."""
+    if providers:
+        return False
+
+    from hobees.core.provider_detector import is_first_launch
+
+    if not is_first_launch():
+        return False
+
+    _run_provider_detection()
+    return True
+
+
+@app.command(name="detect-providers")
+def detect_providers() -> None:
+    """Detect available cloud and local providers, then register them."""
+    from hobees.db.session import get_engine
+
+    _ensure_database_initialized(get_engine())
+    _run_provider_detection()
+
+
 def _ensure_database_initialized(engine) -> None:
     """Create the initial schema when the database has not been initialized."""
     from sqlalchemy import inspect
@@ -305,17 +411,94 @@ def init(
         Path | None,
         typer.Option("--config", "-c", help="Path to config file (YAML/JSON) to import after initialization"),
     ] = None,
+    template: Annotated[
+        str | None,
+        typer.Option(
+            "--template", "-t",
+            help="Scaffold from a built-in template: code-review, research, docs-writer, local-ollama, local-llamacpp",
+        ),
+    ] = None,
+    list_templates: Annotated[
+        bool,
+        typer.Option("--list-templates", help="List all available built-in templates and exit"),
+    ] = False,
+    output: Annotated[
+        Path,
+        typer.Option("--output", "-o", help="Destination path for the scaffolded config (default: hobees.yaml)"),
+    ] = Path("hobees.yaml"),
+    force: Annotated[
+        bool,
+        typer.Option("--force", "-f", help="Overwrite destination file if it already exists"),
+    ] = False,
 ) -> None:
-    """Create database tables and optionally auto-import config.
+    """Create database tables and optionally scaffold or auto-import config.
 
     Creates the SQLAlchemy schema and initializes PostgreSQL checkpoints when
     applicable. If HOBEES_DATABASE_URL is not configured, local SQLite is
     selected automatically. PostgreSQL is recommended for multi-process use;
     SQLite is supported for local use. Also runs migrations for existing
     databases and imports config if specified.
+
+    With ``--template``, copies a built-in starter blueprint to disk and
+    immediately imports it so you can start using hobees in one command.
+
+    Examples::
+
+        hobees init --template code-review
+        hobees init --template local-ollama --output my-local.yaml
+        hobees init --list-templates
+        hobees init --config path/to/existing.yaml
     """
     from hobees.db.session import get_engine
     from hobees.db.models import Base
+
+    # --list-templates: show catalogue and exit before touching the DB
+    if list_templates:
+        from hobees.templates import AVAILABLE_TEMPLATES
+        from rich.table import Table as RichTable
+
+        tbl = RichTable(title="Built-in hobees Templates", show_lines=False)
+        tbl.add_column("Name", style="cyan", no_wrap=True)
+        tbl.add_column("Description")
+        for name, desc in AVAILABLE_TEMPLATES.items():
+            tbl.add_row(name, desc)
+        console.print(tbl)
+        console.print(f"\n  Usage: [bold]hobees init --template <name>[/bold]")
+        return
+
+    # --template and --config are mutually exclusive
+    if template and config:
+        console.print(f"{ERROR} --template and --config are mutually exclusive. Use one at a time.")
+        raise typer.Exit(code=1)
+
+    # --template: scaffold a built-in blueprint
+    if template:
+        from hobees.templates import AVAILABLE_TEMPLATES, get_template_text
+
+        if template not in AVAILABLE_TEMPLATES:
+            valid = ", ".join(AVAILABLE_TEMPLATES)
+            console.print(f"{ERROR} Unknown template {template!r}. Valid options: {valid}")
+            console.print(f"  Run [bold]hobees init --list-templates[/bold] to see all options.")
+            raise typer.Exit(code=1)
+
+        dest = Path(output)
+        if dest.exists() and not force:
+            console.print(
+                f"{ERROR} {dest} already exists. Use --force to overwrite, "
+                f"or --output to choose a different destination."
+            )
+            raise typer.Exit(code=1)
+
+        try:
+            yaml_text = get_template_text(template)
+        except (KeyError, FileNotFoundError) as exc:
+            console.print(f"{ERROR} Could not load template {template!r}: {exc}")
+            raise typer.Exit(code=1) from exc
+
+        dest.write_text(yaml_text, encoding="utf-8")
+        console.print(f"{SUCCESS} Scaffolded template [bold]{template}[/bold] → {dest}")
+        # Use the scaffolded file as the config to import
+        config = dest
 
     engine = get_engine()
     try:

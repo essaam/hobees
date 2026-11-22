@@ -35,7 +35,35 @@ hobees --tui
 hobees -p "Summarize this directory"
 ```
 
-### First Run
+### Zero-Config Onboarding
+
+The fastest path to a running hive is a single command.
+
+```bash
+# Scaffold a built-in template, import it, and you're ready to run
+hobees init --template code-review    # OpenAI coder + Anthropic reviewer + planner
+hobees init --template research       # OpenAI searcher + Gemini synthesiser
+hobees init --template docs-writer    # OpenAI writer + editor
+hobees init --template local-ollama   # Ollama on localhost:11434 — no API key needed
+hobees init --template local-llamacpp # llama-server on localhost:8080 — no API key needed
+
+# See all available templates
+hobees init --list-templates
+
+# Then run a hive immediately
+hobees hive run dev-team "Review the changes in src/ and suggest improvements"
+```
+
+On **first launch with no providers configured**, hobees automatically scans your environment for available providers and offers to register them in one step:
+
+- Cloud: checks `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, `GEMINI_API_KEY`, `OPENROUTER_API_KEY`
+- Local: probes `localhost:11434` (Ollama), `localhost:8080` (llama-server), `localhost:1234` (LM Studio)
+
+The scan runs once and writes `~/.hobees/.detected` so it never fires again on subsequent launches.
+To scan again later, run `hobees detect-providers` from a terminal or `/detect_providers` in the interactive shell. This explicit command always runs, regardless of the sentinel. In a headless environment, it skips confirmation and registers detected providers automatically.
+Providers already in the registry are reported as already registered and are excluded from the new-provider list.
+
+### Manual Setup (optional)
 
 ```bash
 # 1. Optionally configure a database
@@ -277,6 +305,18 @@ hobees hive remove research-team --yes
 hobees hive run research-team "Research Rust async patterns" --thread rust-async-1 --json
 # Equivalent root command:
 hobees run --hive research-team "Research Rust async patterns" --quiet
+
+# Zero-config onboarding: scaffold a built-in template
+hobees init --list-templates
+hobees init --template code-review               # writes hobees.yaml and imports it
+hobees init --template local-ollama              # zero API keys — uses Ollama
+hobees init --template research --output r.yaml  # custom output path
+hobees init --template code-review --force       # overwrite existing hobees.yaml
+
+# Rerun provider detection at any time
+hobees detect-providers
+# In the interactive shell:
+# /detect_providers
 
 # Declarative setup and direct interactive hive launch
 hobees init --config ./hobees.yaml

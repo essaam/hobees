@@ -21,6 +21,7 @@ COMMANDS: dict[str, CommandSpec] = {
         "Manage LLM providers; 'models' lists a provider's models, 'use' switches to one, 'edit' edits details",
         ("add", "list", "test", "remove", "edit", "models", "use"),
     ),
+    "detect_providers": ("Scan for available cloud and local providers, then register them", ()),
     "assistant": (
         "Configure the default assistant agent (persisted across launches)",
         ("show", "use", "model"),
