@@ -19,7 +19,6 @@ Use Python 3.11 or newer and install `uv`.
 
 ```bash
 uv sync
-cp .env.example .env
 uv run hobees init
 ```
 

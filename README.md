@@ -1,8 +1,21 @@
 # hobees (alias `hobiz`)
 
-**Hobees makes Bee and Hive workflows usable as repeatable command-line jobs, including in short-lived containers, while keeping an interactive shell and TUI available.** The name is inspired by honey bees. It is built with LangGraph; PostgreSQL is recommended for multi-process use, while SQLite is supported for local use.
+[![PyPI version](https://img.shields.io/pypi/v/hobees.svg)](https://pypi.org/project/hobees/)
+[![Python 3.11+](https://img.shields.io/badge/python-3.11+-blue.svg)](https://www.python.org/downloads/)
+[![License](https://img.shields.io/github/license/essaam/hobees.svg)](LICENSE)
 
----
+**Declarative (config-driven), CLI-first multi-agent orchestration built on LangGraph.**
+
+*Hobees makes Bee and Hive workflows usable as repeatable command-line jobs, including in short-lived containers, while keeping an interactive shell and TUI available.* The name is inspired by honey bees. PostgreSQL is recommended for multi-process use, while SQLite is supported for local use.
+
+## Why `hobees`?
+
+Most multi-agent frameworks force you to write glue code to wire agents together, and then break down when you try to move from a local prototype to a reproducible pipeline. `hobees` treats agent teams as **portable, repeatable configuration**:
+
+* **Interactive TUI + Headless CLI:** Prototype prompts and watch live delegation in the terminal, then run the exact same Hive non-interactively in GitHub Actions, cron jobs, or Docker workers.
+* **Mix Local & Cloud Models per Agent:** Assign a high-reasoning frontier model (`thinking: high`) to your Supervisor while routing repetitive tasks to fast local models (`Ollama`, `llama.cpp`) or lightweight APIs.
+* **Resumable Execution & Scoped Memory:** Backed by SQLite or PostgreSQL checkpoints (`--thread`), isolated workspace directories, and scoped memory (`global`, `hive`, or `bee` namespaces).
+* **Self-Improving Workflows:** Capture successful multi-agent runs into reusable Markdown skills (`/skill save-last`) that future Hives automatically load.
 
 ## 🍯 Quick Start
 
@@ -15,14 +28,17 @@ git clone https://github.com/essaam/hobees.git
 cd hobees
 uv sync
 uv run hobees
+
+# Launch the interactive CLI/TUI or run a single-shot headless job
+hobees # CLI
+hobees --tui
+hobees -p "Summarize this directory"
 ```
 
 ### First Run
 
 ```bash
 # 1. Optionally configure a database
-mkdir -p ~/.hobees
-cp .env.example ~/.hobees/.env
 # Set HOBEES_DATABASE_URL in ~/.hobees/.env to choose a database.
 # Without it, Hobees uses local SQLite by default.
 # Export any provider API key named by api_key_env, e.g. OPENAI_API_KEY.
@@ -38,7 +54,9 @@ hobees
 🍯 hobees > /goal build a landing page   # Run goal through the dynamic-Hive handler
 
 # 4. Single-shot mode
-hobees -p "summarize the latest docs"
+hobees -p "Summarize the docs in this workspace"
+# or run an existing Hive headlessly
+hobees run --hive dev-team --json "Add feature x to y"
 ```
 
 ---
@@ -561,56 +579,26 @@ cd hobees
 uv sync
 
 # Configure PostgreSQL (recommended) or SQLite
-mkdir -p ~/.hobees
-cp .env.example ~/.hobees/.env
-# Set HOBEES_DATABASE_URL and export provider API keys in the process environment.
+# Set HOBEES_DATABASE_URL in ~/.hobees/.env and export provider API keys in the process environment.
 
 # Initialize
 uv run hobees init
 ```
 
-### Project Structure
+### High-Level Project Structure
 ```text
 hobees/
-├── pyproject.toml
-├── uv.lock
-├── Dockerfile
-├── compose.yaml
-├── .dockerignore
-├── .env.example
-├── .env.docker.example
-├── README.md
-├── CONTRIBUTING.md
-├── CHANGELOG.md
-└── src/hobees/
-    ├── __init__.py
-    ├── config.py              # Pydantic settings
-    ├── db/
-    │   ├── session.py         # SQLAlchemy engine and session management
-    │   ├── models.py          # SQLAlchemy ORM models
-    │   └── analytics.py       # Fast SQL aggregations for usage insights
-    ├── core/
-    │   ├── llm_factory.py     # Resolves providers → LangChain ChatModels
-    │   ├── telemetry.py       # LangChain CallbackHandler (live tokens/cost)
-    │   ├── tool_registry.py   # Built-in @tool functions + registry
-    │   ├── hive_builder.py    # Builds a StateGraph with create_agent workers and supervisor
-    │   ├── queen.py           # Meta-Orchestrator agent
-    │   ├── model_discovery.py # Auto-fetch models from providers
-    │   ├── context_manager.py # Worker projection, compaction, scratchpad
-    │   ├── memory_manager.py  # Scoped memory retrieval & reflection
-    │   └── skill_harvester.py # Skill-draft extraction for completed Hive runs
-    ├── api/
-    │   └── app.py             # FastAPI app (endpoints + SSE)
-    └── cli/
-        ├── main.py            # Typer entrypoint; no measured cold-start target
-        ├── shell.py           # prompt_toolkit REPL + slash commands
-        ├── tui.py             # Optional prompt_toolkit split-pane TUI
-        ├── icons.py           # Unicode/ASCII icon registry
-        ├── provider_cmd.py    # Provider handlers (CLI + shell)
-        ├── bee_cmd.py         # Bee handlers (CLI + shell)
-        ├── hive_cmd.py        # Hive handlers (CLI + shell)
-        ├── memory_cmd.py      # Memory handlers (CLI + shell)
-        └── skill_cmd.py       # Skill handlers (CLI + shell)
+├── src/hobees/       # Application package
+│   ├── api/          # FastAPI HTTP and streaming endpoints
+│   ├── cli/          # CLI, REPL, and TUI interfaces
+│   ├── core/         # Agent orchestration and application services
+│   ├── db/           # Database models and persistence
+│   └── config.py     # Pydantic settings
+├── tests/            # Automated test suite
+├── pyproject.toml    # Project and tool configuration
+├── uv.lock           # Dependency lockfile
+├── Dockerfile        # Container build
+└── compose.yaml      # Container orchestration
 ```
 
 ### Adding Custom Tools
