@@ -1893,6 +1893,10 @@ def _dispatch_command(
         _handle_help(args)
     elif cmd == "provider":
         _handle_provider(args, shell_state)
+    elif cmd == "detect_providers":
+        from hobees.cli.main import _run_provider_detection
+
+        _run_provider_detection()
     elif cmd == "assistant":
         _handle_assistant(args, shell_state)
     elif cmd == "bee":
@@ -2037,6 +2041,7 @@ async def _chat_with_assistant(user_input: str, provider: LLMProvider, db_url: s
 You are the hobees assistant. You know the hobees system inside out:
 
 **Core Commands:**
+- `/detect_providers` - Scan for available cloud and local providers, then register them
 - `/provider add|list|models|test|remove` - Manage LLM providers (OpenAI, Anthropic, Ollama, vLLM, etc.)
 - `/bee create|list|update|delete|thinking` - Create worker bees with specific roles, models, tools
 - `/hive create|add-bee|remove-bee|list|use|auto|thinking` - Create teams of bees under a supervisor

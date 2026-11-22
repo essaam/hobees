@@ -1,0 +1,73 @@
+# hobees starter blueprint: docs-writer
+#
+# A documentation team with a writer and editor, both on OpenAI.
+#
+# Required environment variables:
+#   OPENAI_API_KEY — from https://platform.openai.com/api-keys
+#
+# Usage:
+#   hobees init --template docs-writer
+#   hobees hive run docs-team "Write API reference docs for src/hobees/core/queen.py"
+
+providers:
+  - alias: "openai-main"
+    provider_type: "openai"
+    api_key_env: "OPENAI_API_KEY"
+    default_model: "gpt-4o-mini"
+    input_cost_per_1m: 0.15
+    output_cost_per_1m: 0.60
+    context_window_tokens: 128000
+
+bees:
+  - name: "writer"
+    role_description: "Writes technical documentation, READMEs, and guides"
+    system_prompt: |
+      You are a technical writer. Your job is to produce clear, accurate,
+      and developer-friendly documentation. Use Markdown. Keep sentences short.
+      Add code examples wherever useful. Write for an audience of developers.
+    provider: "openai-main"
+    model: "gpt-4o"
+    temperature: 0.4
+    thinking_level: "off"
+    tools:
+      - read_file
+      - write_file
+      - list_directory
+
+  - name: "editor"
+    role_description: "Edits documentation for clarity, consistency, and accuracy"
+    system_prompt: |
+      You are a meticulous technical editor. Review the documentation produced
+      by the writer. Fix grammar, improve clarity, ensure consistency, and
+      verify that code examples are correct and runnable. Return the revised text.
+    provider: "openai-main"
+    model: "gpt-4o"
+    temperature: 0.1
+    thinking_level: "low"
+    tools:
+      - read_file
+      - write_file
+      - list_directory
+
+hives:
+  - name: "docs-team"
+    goal_description: "Documentation team for writing and editing technical docs"
+    supervisor_provider: "openai-main"
+    supervisor_model: "gpt-4o-mini"
+    supervisor_thinking_level: "low"
+    is_dynamic: false
+    bees:
+      - "writer"
+      - "editor"
+
+assistant:
+  provider: "openai-main"
+  model: "gpt-4o-mini"
+  temperature: 0.7
+  thinking_level: "off"
+  tools:
+    - read_file
+    - write_file
+    - list_directory
+    - save_memory
+    - recall_memory

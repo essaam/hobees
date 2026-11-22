@@ -127,6 +127,103 @@ def test_ensure_database_initialized_creates_schema_for_empty_database():
         engine.dispose()
 
 
+def test_provider_detection_gate_runs_only_for_first_launch_without_providers(monkeypatch):
+    detector = Mock(return_value=True)
+    run_detection = Mock()
+    monkeypatch.setattr("hobees.core.provider_detector.is_first_launch", detector)
+    monkeypatch.setattr(main, "_run_provider_detection", run_detection)
+
+    assert main._run_provider_detection_if_needed([]) is True
+    run_detection.assert_called_once_with()
+
+    run_detection.reset_mock()
+    detector.reset_mock()
+    detector.return_value = False
+    assert main._run_provider_detection_if_needed([]) is False
+    run_detection.assert_not_called()
+    detector.assert_called_once()
+
+
+def test_provider_detection_gate_skips_when_providers_exist(monkeypatch):
+    detector = Mock()
+    run_detection = Mock()
+    monkeypatch.setattr("hobees.core.provider_detector.is_first_launch", detector)
+    monkeypatch.setattr(main, "_run_provider_detection", run_detection)
+
+    assert main._run_provider_detection_if_needed([object()]) is False
+    detector.assert_not_called()
+    run_detection.assert_not_called()
+
+
+def test_detect_providers_cli_command_runs_detection(monkeypatch):
+    from typer.testing import CliRunner
+
+    run_detection = Mock()
+    monkeypatch.setattr(main, "_run_provider_detection", run_detection)
+    monkeypatch.setattr(main, "_ensure_database_initialized", Mock())
+    monkeypatch.setattr("hobees.db.session.get_engine", Mock())
+
+    result = CliRunner().invoke(main.app, ["detect-providers"])
+
+    assert result.exit_code == 0, result.output
+    run_detection.assert_called_once_with()
+
+
+def test_provider_detection_skips_registered_candidates(monkeypatch):
+    from io import StringIO
+    from types import SimpleNamespace
+
+    from rich.console import Console
+
+    from hobees.core import provider_detector
+
+    existing = {"alias": "openai-main", "provider_type": "openai", "source_label": "env"}
+    new = {"alias": "local-new", "provider_type": "openai_compatible", "source_label": "local"}
+    output = StringIO()
+    register = Mock(return_value=["local-new"])
+
+    monkeypatch.setattr(main, "console", Console(file=output, force_terminal=False))
+    monkeypatch.setattr(provider_detector, "detect_available_providers", lambda: [existing, new])
+    monkeypatch.setattr(provider_detector, "get_registered_provider_aliases", lambda: {"openai-main"})
+    monkeypatch.setattr(provider_detector, "auto_register_providers", register)
+    monkeypatch.setattr(provider_detector, "mark_detected", Mock())
+    monkeypatch.setattr(main.sys, "stdin", SimpleNamespace(isatty=lambda: False))
+
+    main._run_provider_detection()
+
+    text = output.getvalue()
+    assert "No providers found" not in text
+    assert "Already registered; skipping: openai-main" in text
+    assert text.count("openai-main") == 1
+    assert "local-new" in text
+    register.assert_called_once_with([new])
+
+
+def test_provider_detection_reports_when_all_candidates_are_registered(monkeypatch):
+    from io import StringIO
+
+    from rich.console import Console
+
+    from hobees.core import provider_detector
+
+    candidate = {"alias": "openai-main", "provider_type": "openai", "source_label": "env"}
+    output = StringIO()
+    register = Mock()
+
+    monkeypatch.setattr(main, "console", Console(file=output, force_terminal=False))
+    monkeypatch.setattr(provider_detector, "detect_available_providers", lambda: [candidate])
+    monkeypatch.setattr(provider_detector, "get_registered_provider_aliases", lambda: {"openai-main"})
+    monkeypatch.setattr(provider_detector, "auto_register_providers", register)
+    monkeypatch.setattr(provider_detector, "mark_detected", Mock())
+
+    main._run_provider_detection()
+
+    text = output.getvalue()
+    assert "All detected providers are already registered" in text
+    assert "Detected Providers" not in text
+    register.assert_not_called()
+
+
 def test_shell_routes_unprefixed_input_to_active_hive(monkeypatch):
     chat = Mock()
     async def fake_chat(hive_name, provider, db_url, state, initial_input=None):
@@ -150,6 +247,22 @@ def test_shell_routes_unprefixed_input_to_active_hive(monkeypatch):
         state,
         "implement feature",
     )
+
+
+def test_shell_dispatches_detect_providers_slash_command(monkeypatch):
+    detection = Mock()
+    monkeypatch.setattr(main, "_run_provider_detection", detection)
+
+    should_exit = shell._dispatch_command(
+        "detect_providers",
+        [],
+        "/detect_providers",
+        "sqlite:///:memory:",
+        {},
+    )
+
+    assert should_exit is False
+    detection.assert_called_once_with()
 
 
 def test_stdin_escape_listener_uses_msvcrt_on_windows(monkeypatch):

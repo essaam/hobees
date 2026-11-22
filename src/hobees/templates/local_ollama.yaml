@@ -1,0 +1,78 @@
+# hobees starter blueprint: local-ollama
+#
+# A local-only setup that uses Ollama running on localhost:11434.
+# No API keys required — completely free and private.
+#
+# Prerequisites:
+#   1. Install Ollama: https://ollama.com/download
+#   2. Pull a model:   ollama pull llama3.2
+#   3. Ollama runs automatically in the background after installation.
+#
+# Usage:
+#   hobees init --template local-ollama
+#   hobees hive run local "Explain how LangGraph works"
+
+providers:
+  - alias: "ollama-local"
+    provider_type: "openai_compatible"
+    api_key_env: "NONE"
+    base_url: "http://localhost:11434/v1"
+    default_model: "llama3.2"
+    input_cost_per_1m: 0.0
+    output_cost_per_1m: 0.0
+    context_window_tokens: 128000
+
+bees:
+  - name: "local-assistant"
+    role_description: "General-purpose assistant running locally via Ollama"
+    system_prompt: |
+      You are a helpful, knowledgeable assistant running entirely on the user's
+      local machine. Be concise and practical. Use available tools when helpful.
+    provider: "ollama-local"
+    model: "llama3.2"
+    temperature: 0.7
+    thinking_level: "off"
+    tools:
+      - read_file
+      - write_file
+      - list_directory
+      - run_python_calc
+
+  - name: "local-coder"
+    role_description: "Code-focused assistant using a local Ollama model"
+    system_prompt: |
+      You are a local coding assistant powered by Ollama. Help with writing,
+      reviewing, and debugging code. Be precise and always test your reasoning.
+    provider: "ollama-local"
+    model: "llama3.2"
+    temperature: 0.2
+    thinking_level: "off"
+    tools:
+      - read_file
+      - write_file
+      - list_directory
+      - run_python_calc
+
+hives:
+  - name: "local"
+    goal_description: "Local-only assistant hive powered by Ollama — no API key required"
+    supervisor_provider: "ollama-local"
+    supervisor_model: "llama3.2"
+    supervisor_thinking_level: "off"
+    is_dynamic: false
+    bees:
+      - "local-assistant"
+      - "local-coder"
+
+assistant:
+  provider: "ollama-local"
+  model: "llama3.2"
+  temperature: 0.7
+  thinking_level: "off"
+  tools:
+    - read_file
+    - write_file
+    - list_directory
+    - run_python_calc
+    - save_memory
+    - recall_memory
