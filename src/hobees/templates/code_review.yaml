@@ -1,0 +1,98 @@
+# hobees starter blueprint: code-review
+#
+# A full code-review pipeline with an OpenAI coder, Anthropic reviewer,
+# and an OpenAI planner — all coordinated by a supervisor.
+#
+# Required environment variables:
+#   OPENAI_API_KEY     — from https://platform.openai.com/api-keys
+#   ANTHROPIC_API_KEY  — from https://console.anthropic.com/settings/keys
+#
+# Usage:
+#   hobees init --template code-review
+#   hobees hive run dev-team "Review the changes in src/ and suggest improvements"
+
+providers:
+  - alias: "openai-main"
+    provider_type: "openai"
+    api_key_env: "OPENAI_API_KEY"
+    default_model: "gpt-4o-mini"
+    input_cost_per_1m: 0.15
+    output_cost_per_1m: 0.60
+    context_window_tokens: 128000
+
+  - alias: "anthropic-main"
+    provider_type: "anthropic"
+    api_key_env: "ANTHROPIC_API_KEY"
+    default_model: "claude-3-5-sonnet-20241022"
+    input_cost_per_1m: 3.00
+    output_cost_per_1m: 15.00
+    context_window_tokens: 200000
+
+bees:
+  - name: "coder"
+    role_description: "Writes, reviews, and refactors code"
+    system_prompt: |
+      You are an expert software engineer. Write clean, maintainable code.
+      Follow best practices and write tests when appropriate.
+    provider: "openai-main"
+    model: "gpt-4o"
+    temperature: 0.2
+    thinking_level: "off"
+    tools:
+      - read_file
+      - write_file
+      - list_directory
+      - run_python_calc
+
+  - name: "reviewer"
+    role_description: "Reviews code for quality, security, and best practices"
+    system_prompt: |
+      You are a senior code reviewer. Find bugs, security issues, and style problems.
+      Be thorough but constructive. Always explain the 'why' behind your suggestions.
+    provider: "anthropic-main"
+    model: "claude-3-5-sonnet-20241022"
+    temperature: 0.0
+    thinking_level: "medium"
+    tools:
+      - read_file
+      - list_directory
+
+  - name: "planner"
+    role_description: "Creates implementation plans and breaks down tasks"
+    system_prompt: |
+      You are a technical planner. Break down complex goals into actionable steps.
+      Consider dependencies, risks, and testing strategies.
+    provider: "openai-main"
+    model: "gpt-4o"
+    temperature: 0.3
+    thinking_level: "high"
+    tools:
+      - read_file
+      - list_directory
+      - save_memory
+      - recall_memory
+
+hives:
+  - name: "dev-team"
+    goal_description: "Full-stack development team for building and reviewing features"
+    supervisor_provider: "openai-main"
+    supervisor_model: "gpt-4o"
+    supervisor_thinking_level: "medium"
+    is_dynamic: false
+    bees:
+      - "coder"
+      - "reviewer"
+      - "planner"
+
+assistant:
+  provider: "openai-main"
+  model: "gpt-4o-mini"
+  temperature: 0.7
+  thinking_level: "off"
+  tools:
+    - read_file
+    - write_file
+    - list_directory
+    - run_python_calc
+    - save_memory
+    - recall_memory

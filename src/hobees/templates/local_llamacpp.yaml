@@ -1,0 +1,81 @@
+# hobees starter blueprint: local-llamacpp
+#
+# A local-only setup using llama-server (llama.cpp) on localhost:8080.
+# No API keys required — completely free and private.
+#
+# Prerequisites:
+#   1. Build llama.cpp: https://github.com/ggerganov/llama.cpp#build
+#   2. Download a GGUF model, e.g.:
+#        curl -L -o qwen2.5-coder-7b.gguf \
+#          https://huggingface.co/Qwen/Qwen2.5-Coder-7B-Instruct-GGUF/resolve/main/qwen2.5-coder-7b-instruct-q4_k_m.gguf
+#   3. Start the server:
+#        llama-server -m qwen2.5-coder-7b.gguf --port 8080
+#
+# Usage:
+#   hobees init --template local-llamacpp
+#   hobees hive run local "Refactor this Python function for clarity"
+
+providers:
+  - alias: "llamacpp-local"
+    provider_type: "openai_compatible"
+    api_key_env: "NONE"
+    base_url: "http://localhost:8080/v1"
+    default_model: "qwen2.5-coder-7b"
+    input_cost_per_1m: 0.0
+    output_cost_per_1m: 0.0
+    context_window_tokens: 32768
+
+bees:
+  - name: "local-assistant"
+    role_description: "General-purpose assistant using a local llama.cpp model"
+    system_prompt: |
+      You are a helpful assistant running entirely on the user's local machine
+      via llama.cpp. Be concise, accurate, and use tools when appropriate.
+    provider: "llamacpp-local"
+    model: "qwen2.5-coder-7b"
+    temperature: 0.7
+    thinking_level: "off"
+    tools:
+      - read_file
+      - write_file
+      - list_directory
+      - run_python_calc
+
+  - name: "local-coder"
+    role_description: "Code-focused assistant using a local llama.cpp model"
+    system_prompt: |
+      You are a local coding assistant powered by llama.cpp. Help with writing,
+      reviewing, and debugging code. Be precise and always test your reasoning.
+    provider: "llamacpp-local"
+    model: "qwen2.5-coder-7b"
+    temperature: 0.1
+    thinking_level: "off"
+    tools:
+      - read_file
+      - write_file
+      - list_directory
+      - run_python_calc
+
+hives:
+  - name: "local"
+    goal_description: "Local-only assistant hive powered by llama.cpp — no API key required"
+    supervisor_provider: "llamacpp-local"
+    supervisor_model: "qwen2.5-coder-7b"
+    supervisor_thinking_level: "off"
+    is_dynamic: false
+    bees:
+      - "local-assistant"
+      - "local-coder"
+
+assistant:
+  provider: "llamacpp-local"
+  model: "qwen2.5-coder-7b"
+  temperature: 0.7
+  thinking_level: "off"
+  tools:
+    - read_file
+    - write_file
+    - list_directory
+    - run_python_calc
+    - save_memory
+    - recall_memory
