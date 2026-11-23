@@ -21,6 +21,12 @@ to a heading matching that version and add the release date.
 
 ### Fixed
 
+- Core: path segments derived from namespaced thread keys now go through
+  `hobees.core.paths.safe_path_component()` (`:` → `__`), so the scratchpad
+  directory that stores offloaded tool output is a legal path on Windows. The
+  preview a Bee is shown now names the directory it can actually read back, and
+  tool path resolution returns `ERROR:` for a path that cannot exist on the
+  platform instead of raising `OSError` (`[WinError 123]`) during a run.
 - Web UI: the Workbench provider/target picker no longer resets to the first
   entry when switching views or the Assistant/Hive/Bee tabs. Pickers now live in
   the app context per scope and are persisted (localStorage), so the chosen

@@ -1066,7 +1066,9 @@ async def _run_single_bee_task(
         if not provider:
             return
 
-    art_path = settings.artifacts_root / bee.name
+    from hobees.core.paths import safe_path_component
+
+    art_path = settings.artifacts_root / safe_path_component(bee.name)
     art_path.mkdir(parents=True, exist_ok=True)
     (art_path / "output").mkdir(parents=True, exist_ok=True)
     traces_dir = art_path / "traces"

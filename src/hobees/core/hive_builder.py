@@ -117,7 +117,9 @@ def _build_hive_graph(
     elif hasattr(hive, "project_path") and hive.project_path:
         project_root = Path(hive.project_path)
     else:
-        project_root = settings.artifacts_root / hive.name
+        from hobees.core.paths import safe_path_component
+
+        project_root = settings.artifacts_root / safe_path_component(hive.name)
 
     project_root.mkdir(parents=True, exist_ok=True)
     (project_root / "output").mkdir(parents=True, exist_ok=True)

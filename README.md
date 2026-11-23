@@ -506,7 +506,7 @@ hobees trace --thread <id> [--container <name>] [--hive <name>] [--json]
 
 The JSON record contains `container`, `thread`, `status` (`completed`, `awaiting_approval`, `failed`, or `unknown` when no run row exists), the `events` read from the JSONL file, `approvals` (mode, decision, `wait_ms`, original vs. edited args, reason) and `usage` (model, latency, tokens, `checkpoint_id`). The human output prints each gate as `GATE <mode>: <tool> [<decision>] bee=<bee>` and then the event list.
 
-Trace events are appended under `artifacts/<hive>/traces/`, and `/hive trace [name]` in the shell or TUI prints the newest log for a hive. Because `:` cannot appear in a Windows filename, the file name escapes it (`:` → `__`) — `coder-worker-1__hive__dev-team__pr-42.jsonl` — while the full key stays inside every event, so reconstruction joins by the event's `thread_id` rather than by the file name.
+Trace events are appended under `artifacts/<hive>/traces/`, and `/hive trace [name]` in the shell or TUI prints the newest log for a hive. Because `:` cannot appear in a Windows filename, the file name escapes it (`:` → `__`) — `coder-worker-1__hive__dev-team__pr-42.jsonl` — while the full key stays inside every event, so reconstruction joins by the event's `thread_id` rather than by the file name. The same escaping is applied to the scratchpad directory that stores offloaded tool output (`artifacts/<hive>/scratchpad/<escaped thread key>/<call_id>.txt`), so the path a Bee is shown is the path it can actually read back.
 
 ### Replay from a checkpoint
 

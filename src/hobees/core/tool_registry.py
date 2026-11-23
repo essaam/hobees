@@ -74,18 +74,27 @@ def _get_project_root() -> str | None:
 def _resolve_tool_path(path: str, *, write: bool = False) -> Path:
     project_root = _get_project_root()
     if not project_root:
-        return Path(path).resolve()
+        try:
+            return Path(path).resolve()
+        except OSError as exc:
+            raise ValueError(f"{path!r} cannot be resolved on this system: {exc}") from exc
 
     root = Path(project_root).resolve()
     allowed_root = (root / "output").resolve() if write else root
     requested_path = Path(path)
     if write and not requested_path.is_absolute() and requested_path.parts[:1] == ("output",):
         requested_path = Path(*requested_path.parts[1:])
-    resolved = (
-        requested_path.resolve()
-        if requested_path.is_absolute()
-        else (allowed_root / requested_path).resolve()
-    )
+    try:
+        resolved = (
+            requested_path.resolve()
+            if requested_path.is_absolute()
+            else (allowed_root / requested_path).resolve()
+        )
+    except OSError as exc:
+        # Windows rejects path segments containing `:` (the default thread key is
+        # namespaced), so a raw key passed back to a tool must fail with a clear
+        # message instead of an unhandled OSError.
+        raise ValueError(f"{path!r} cannot be resolved on this system: {exc}") from exc
     if not resolved.is_relative_to(allowed_root):
         scope = "output directory" if write else "project root"
         raise ValueError(f"{path!r} is outside the configured {scope}")

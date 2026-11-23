@@ -464,7 +464,9 @@ def hive_app(hive, bees, providers, db_url, thread_id, run_id, thinking_override
 LangGraph checkpoint backend. File-backed SQLite checkpoints persist in the
 SQLite database; in-memory SQLite checkpoints are temporary. Hive tool output
 is written beneath the active project/artifact root, typically
-`artifacts/<hive>/scratchpad/<thread_id>/<call_id>.txt`.
+`artifacts/<hive>/scratchpad/<escaped thread key>/<call_id>.txt` (the thread key
+is escaped with `hobees.core.paths.safe_path_component()` so the directory is a
+legal path segment on Windows).
 
 **Applied in:** `hive_app()`, `hive_app_async()`, shell/TUI chats
 

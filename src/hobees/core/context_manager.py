@@ -15,6 +15,7 @@ from pathlib import Path
 from typing import Any
 
 from hobees.config import settings
+from hobees.core.paths import safe_path_component
 
 # Scratchpad directory for offloaded tool outputs
 _SCRATCHPAD_ROOT = Path.home() / ".hobees" / "scratchpad"
@@ -37,14 +38,18 @@ def truncate_tool_output(
     if len(output) <= MAX_TOOL_OUTPUT_CHARS:
         return output
 
-    # Write full output to scratchpad
+    # Write full output to scratchpad. The thread key is namespaced (`:`), which
+    # is not a legal path segment on Windows, so the directory and the path shown
+    # to the model both use the same filesystem-safe form.
     scratch_root = scratchpad_root or _SCRATCHPAD_ROOT
-    scratch_dir = scratch_root / thread_id
+    thread_dir = safe_path_component(thread_id)
+    call_name = safe_path_component(call_id, separator="_")
+    scratch_dir = scratch_root / thread_dir
     scratch_dir.mkdir(parents=True, exist_ok=True)
-    scratch_file = scratch_dir / f"{call_id}.txt"
+    scratch_file = scratch_dir / f"{call_name}.txt"
     scratch_file.write_text(output, encoding="utf-8")
     display_path = (
-        (Path("scratchpad") / thread_id / scratch_file.name).as_posix()
+        (Path("scratchpad") / thread_dir / scratch_file.name).as_posix()
         if scratchpad_root
         else scratch_file
     )
