@@ -1173,16 +1173,20 @@ def _handle_chat(args: list[str], provider: LLMProvider | None, db_url: str, she
         if not rest:
             console.print("Usage: /chat bee <name>")
             return
-        import asyncio
-        asyncio.run(_chat_with_bee(rest[0], provider, db_url, shell_state))
+        _run_async_in_shell_loop(
+            _chat_with_bee(rest[0], provider, db_url, shell_state),
+            shell_state,
+        )
         return
 
     if cmd == "hive":
         if not rest:
             console.print("Usage: /chat hive <name>")
             return
-        import asyncio
-        asyncio.run(_chat_with_hive(rest[0], provider, db_url, shell_state))
+        _run_async_in_shell_loop(
+            _chat_with_hive(rest[0], provider, db_url, shell_state),
+            shell_state,
+        )
         return
 
     console.print("[bold]Chat usage:[/bold] /chat bee <name>, /chat hive <name>, /chat list")
@@ -1882,6 +1886,71 @@ def _shell_loop(ctx_obj: dict | None = None, selected_provider: LLMProvider | No
 
         if should_exit:
             break
+    _stop_shell_chat_loop(shell_state)
+
+
+def _ensure_shell_chat_loop(shell_state: dict) -> tuple["asyncio.AbstractEventLoop", "threading.Thread"]:
+    import asyncio
+    import threading
+
+    loop = shell_state.get("_chat_loop")
+    thread = shell_state.get("_chat_loop_thread")
+    if loop is not None and thread is not None and not loop.is_closed() and thread.is_alive():
+        return loop, thread
+
+    loop_ready = threading.Event()
+
+    def run_loop() -> None:
+        chat_loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(chat_loop)
+        shell_state["_chat_loop"] = chat_loop
+        loop_ready.set()
+        try:
+            chat_loop.run_forever()
+        finally:
+            pending = asyncio.all_tasks(chat_loop)
+            for task in pending:
+                task.cancel()
+            if pending:
+                chat_loop.run_until_complete(
+                    asyncio.gather(*pending, return_exceptions=True)
+                )
+            chat_loop.run_until_complete(chat_loop.shutdown_asyncgens())
+            chat_loop.close()
+            asyncio.set_event_loop(None)
+            shell_state["_chat_loop"] = None
+
+    thread = threading.Thread(
+        target=run_loop,
+        name="hobees-shell-chat",
+        daemon=True,
+    )
+    thread.start()
+    loop_ready.wait()
+    loop = shell_state["_chat_loop"]
+    shell_state["_chat_loop_thread"] = thread
+    return loop, thread
+
+
+def _run_async_in_shell_loop(coro, shell_state: dict):
+    import asyncio
+
+    loop, _thread = _ensure_shell_chat_loop(shell_state)
+    future = asyncio.run_coroutine_threadsafe(coro, loop)
+    return future.result()
+
+
+def _stop_shell_chat_loop(shell_state: dict) -> None:
+    import threading
+
+    loop = shell_state.get("_chat_loop")
+    thread = shell_state.get("_chat_loop_thread")
+    if loop is not None and not loop.is_closed():
+        loop.call_soon_threadsafe(loop.stop)
+    if thread is not None and thread.is_alive():
+        thread.join(timeout=2)
+    shell_state["_chat_loop"] = None
+    shell_state["_chat_loop_thread"] = None
 
 
 def _dispatch_command(
@@ -1928,35 +1997,28 @@ def _dispatch_command(
         # If input doesn't start with / and we have a provider, treat as chat with assistant
         current_provider = shell_state.get("provider")
         if current_provider and not user_input.startswith("/"):
-            import asyncio
-            import concurrent.futures
-
-            def run_async_in_thread():
-                # Keep chat on a worker-thread loop so prompt_toolkit can continue
-                # driving the terminal while the model streams. asyncio.run owns
-                # the loop lifecycle and cancels/drains remaining async tasks.
-                active_hive = shell_state.get("active_hive")
-                if active_hive:
-                    return asyncio.run(
-                        _chat_with_hive(
-                            active_hive,
-                            current_provider,
-                            db_url,
-                            shell_state,
-                            initial_input=user_input,
-                        )
-                    )
-                return asyncio.run(
+            active_hive = shell_state.get("active_hive")
+            if active_hive:
+                _run_async_in_shell_loop(
+                    _chat_with_hive(
+                        active_hive,
+                        current_provider,
+                        db_url,
+                        shell_state,
+                        initial_input=user_input,
+                    ),
+                    shell_state,
+                )
+            else:
+                _run_async_in_shell_loop(
                     _chat_with_assistant(
                         user_input,
                         current_provider,
                         db_url,
                         shell_state,
-                    )
+                    ),
+                    shell_state,
                 )
-
-            with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
-                executor.submit(run_async_in_thread).result()
         else:
             console.print(f"[bold]Unknown command: {cmd}[/bold]")
             console.print("  Type /help to see available commands.")

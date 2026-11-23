@@ -249,7 +249,7 @@ def test_shell_routes_unprefixed_input_to_active_hive(monkeypatch):
     )
 
 
-def test_shell_routes_repeated_unprefixed_input_with_fresh_loops(monkeypatch):
+def test_shell_routes_repeated_unprefixed_input_with_persistent_loop(monkeypatch):
     received = []
 
     async def fake_chat(provider, db_url, state, initial_input=None):
@@ -284,7 +284,8 @@ def test_shell_routes_repeated_unprefixed_input_with_fresh_loops(monkeypatch):
     )
 
     assert [item[0] for item in received] == ["first", "second"]
-    assert received[0][1] is not received[1][1]
+    assert received[0][1] is received[1][1]
+    shell._stop_shell_chat_loop(state)
 
 
 def test_shell_dispatches_detect_providers_slash_command(monkeypatch):
