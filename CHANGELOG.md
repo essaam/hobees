@@ -6,6 +6,19 @@ to a heading matching that version and add the release date.
 
 ## Unreleased
 
+### New Features
+
+- Web UI: the assistant chat now uses an explicitly selected model. The Workbench
+  shows a model picker built from the provider's auto-detected models and the
+  selection is remembered per provider.
+- Web UI: the Provider, Bee and Hive dialogs in Hive Studio share one model picker
+  with a **Detect models** action (provider auto-detection) and an inline
+  **Test model** check that runs a single minimal completion.
+- Web API: `GET /api/v1/providers/models` (auto-detection, cached on the provider
+  row when not read-only) and `POST /api/v1/providers/test` (config + one minimal
+  completion, reasons reported inline); `POST /api/v1/runs` accepts `model` and
+  rejects an assistant run with no model instead of guessing one.
+
 ### Fixed
 
 - Web UI: the Workbench provider/target picker no longer resets to the first
@@ -13,9 +26,12 @@ to a heading matching that version and add the release date.
   the app context per scope and are persisted (localStorage), so the chosen
   provider is restored on return; it only falls back to the first entry when the
   remembered selection is missing or was deleted.
-- Web UI: Command Palette arrow keys (↑/↓) now navigate the results from any
-  focus position inside the palette, the highlight is clamped to the filtered
-  list, and the active entry is scrolled into view.
+- Web UI: Command Palette arrow keys (↑/↓) now navigate the results from any focus
+  position inside the palette, the highlight is clamped to the filtered list, and
+  the active entry is scrolled into view. The footer legend no longer advertises
+  arrow navigation (it now reads `Type to filter · Enter to run`).
+- Web UI: the Studio provider form no longer offers `gemini`, which the backend
+  expects as `google_genai`; provider types are validated on create.
 
 ## 0.1.0a5 - 2026-11-22
 

@@ -13,7 +13,7 @@ from fastapi.testclient import TestClient
 
 from hobees.config import settings
 from hobees.core.tracing import trace_filename
-from hobees.db.models import ApprovalEvent, Base, Bee, LLMProvider, Run, UsageEvent
+from hobees.db.models import ApprovalEvent, Base, Bee, Run, UsageEvent
 from hobees.db.session import dispose_engine, get_engine, session_scope
 from hobees.web.app import create_web_app
 

@@ -59,6 +59,16 @@ def test_command_palette_handles_arrow_keys_from_any_focus():
     assert "↑↓" not in palette
 
 
+def test_model_picker_is_shared_by_provider_bee_and_hive_dialogs():
+    studio = read("pages/Studio.tsx")
+    assert "function ModelPicker" in studio
+    assert "Detect models" in studio
+    assert "Test model" in studio
+    for dialog in ("ProviderDialog", "BeeDialog", "HiveDialog"):
+        body = studio.split(f"function {dialog}(")[1]
+        assert "ModelPicker" in body, f"{dialog} must use the auto-detected model picker"
+
+
 def test_assistant_chat_picks_a_model_from_auto_detection():
     workbench = read("pages/Workbench.tsx")
     assert 'aria-label="Select model"' in workbench

@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { useSearchParams } from 'react-router-dom';
 import {
   Bot,
@@ -633,6 +633,162 @@ function DialogShell({
   );
 }
 
+/** Model picker shared by the Provider, Bee and Hive dialogs: the list comes
+ * from provider model auto-detection, a custom name can still be typed, and the
+ * selected model can be health-checked with one minimal completion. */
+function ModelPicker({
+  label,
+  value,
+  onChange,
+  provider,
+  inlineConfig,
+}: {
+  label: string;
+  value: string;
+  onChange: (model: string) => void;
+  provider: Provider | null;
+  inlineConfig?: { provider_type: string; base_url: string; api_key_env: string };
+}) {
+  const { readOnly } = useAppContext();
+  const detect = useDetectProviderModels();
+  const test = useTestProviderModel();
+  const [detected, setDetected] = useState<Record<string, string[]>>({});
+  const [testResult, setTestResult] = useState<ProviderModelTestResponse | null>(null);
+  const key = provider?.alias ?? '__unsaved__';
+  const models = detected[key] ?? provider?.available_models ?? [];
+
+  const config = {
+    provider_type: provider?.provider_type ?? inlineConfig?.provider_type ?? '',
+    base_url: provider?.base_url ?? inlineConfig?.base_url ?? '',
+    api_key_env: provider?.api_key_env ?? inlineConfig?.api_key_env ?? 'NONE',
+  };
+
+  const runDetect = (refresh: boolean) => {
+    detect.mutate(
+      provider ? { alias: provider.alias, refresh } : { ...config, refresh },
+      {
+        onSuccess: (res) => {
+          setDetected((prev) => ({ ...prev, [key]: res.models }));
+          if (res.models.length === 0 && !value) {
+            setTestResult({
+              success: false,
+              detail: 'No models detected — check base_url / API key env var or type the model name.',
+              model: null,
+              latency_ms: 0,
+            });
+          }
+        },
+        onError: (ex) =>
+          setTestResult({
+            success: false,
+            detail: ex instanceof Error ? ex.message : 'Model detection failed',
+            model: null,
+            latency_ms: 0,
+          }),
+      },
+    );
+  };
+
+  // Probe once per dialog instance when nothing is cached for this provider.
+  const probed = useRef(false);
+  useEffect(() => {
+    if (probed.current) return;
+    probed.current = true;
+    if (models.length === 0 && (provider || config.provider_type)) runDetect(false);
+  }, []);
+
+  const runTest = () => {
+    if (!value) return;
+    setTestResult(null);
+    test.mutate(
+      {
+        alias: provider?.alias ?? null,
+        provider_type: config.provider_type,
+        base_url: config.base_url || null,
+        api_key_env: config.api_key_env || 'NONE',
+        model: value,
+      },
+      {
+        onSuccess: (res) => setTestResult(res),
+        onError: (ex) =>
+          setTestResult({
+            success: false,
+            detail: ex instanceof Error ? ex.message : 'Model test failed',
+            model: value,
+            latency_ms: 0,
+          }),
+      },
+    );
+  };
+
+  return (
+    <Field label={label}>
+      <div className="flex items-center gap-2">
+        {models.length > 0 ? (
+          <select
+            value={value}
+            onChange={(e) => {
+              onChange(e.target.value);
+              setTestResult(null);
+            }}
+            className="w-full rounded-lg border border-zinc-200 bg-white px-3 py-2 font-mono text-sm"
+          >
+            {value && !models.includes(value) && (
+              <option value={value}>{value} (current/custom)</option>
+            )}
+            {models.map((model) => (
+              <option key={model} value={model}>
+                {model}
+              </option>
+            ))}
+          </select>
+        ) : (
+          <input
+            value={value}
+            onChange={(e) => {
+              onChange(e.target.value);
+              setTestResult(null);
+            }}
+            placeholder="model name (e.g. gpt-4o-mini)"
+            className="w-full rounded-lg border border-zinc-200 px-3 py-2 font-mono text-sm"
+          />
+        )}
+        <button
+          type="button"
+          onClick={() => runDetect(true)}
+          disabled={detect.isPending}
+          title="Fetch the models this provider reports"
+          className="shrink-0 rounded-lg border border-zinc-200 bg-white px-3 py-2 text-xs font-medium text-zinc-700 hover:bg-zinc-50 disabled:opacity-50"
+        >
+          {detect.isPending ? 'Detecting…' : 'Detect models'}
+        </button>
+      </div>
+      <div className="mt-2 flex flex-wrap items-center gap-2 text-xs">
+        <button
+          type="button"
+          onClick={runTest}
+          disabled={test.isPending || !value || readOnly}
+          title={readOnly ? 'Model testing is disabled in read-only mode' : 'Send one minimal completion to this model'}
+          className="rounded-lg border border-zinc-200 bg-white px-3 py-1.5 font-medium text-zinc-700 hover:bg-zinc-50 disabled:opacity-50"
+        >
+          {test.isPending ? 'Testing…' : 'Test model'}
+        </button>
+        {testResult ? (
+          <span className={testResult.success ? 'text-emerald-700' : 'text-rose-700'}>
+            {testResult.success
+              ? `OK in ${testResult.latency_ms} ms — ${testResult.detail}`
+              : `${testResult.detail}`}
+          </span>
+        ) : (
+          <span className="text-zinc-400">
+            {value ? `${models.length} model(s) available` : 'Select a model (detect or type one).'}
+          </span>
+        )}
+      </div>
+    </Field>
+  );
+}
+
 function ProviderDialog({
   initial,
   saving,
@@ -661,62 +817,6 @@ function ProviderDialog({
   const [baseUrl, setBaseUrl] = useState(initial?.base_url ?? '');
   const [apiKeyEnv, setApiKeyEnv] = useState(initial?.api_key_env ?? 'OPENAI_API_KEY');
   const [defaultModel, setDefaultModel] = useState(initial?.default_model ?? '');
-  const [models, setModels] = useState<string[]>(initial?.available_models ?? []);
-  const [testResult, setTestResult] = useState<ProviderModelTestResponse | null>(null);
-  const detectModels = useDetectProviderModels();
-  const testModel = useTestProviderModel();
-
-  const detect = (refresh: boolean) => {
-    setErr(null);
-    detectModels.mutate(
-      initial
-        ? { alias: initial.alias, refresh }
-        : {
-            provider_type: providerType,
-            base_url: baseUrl.trim(),
-            api_key_env: apiKeyEnv.trim() || 'NONE',
-            refresh,
-          },
-      {
-        onSuccess: (res) => {
-          setModels(res.models);
-          if (res.models.length === 0) {
-            setErr('No models detected — check the base URL / API key env var, or type the model name.');
-          } else if (!models.includes(defaultModel)) {
-            setDefaultModel(defaultModel || res.models[0]);
-          }
-        },
-        onError: (ex) => setErr(ex instanceof Error ? ex.message : 'Model detection failed'),
-      },
-    );
-  };
-
-  const runTest = () => {
-    if (!defaultModel) {
-      setErr('Pick a model to test.');
-      return;
-    }
-    setTestResult(null);
-    testModel.mutate(
-      {
-        alias: initial?.alias ?? null,
-        provider_type: providerType,
-        base_url: baseUrl.trim() || null,
-        api_key_env: apiKeyEnv.trim() || 'NONE',
-        model: defaultModel,
-      },
-      {
-        onSuccess: (res) => setTestResult(res),
-        onError: (ex) => setErr(ex instanceof Error ? ex.message : 'Model test failed'),
-      },
-    );
-  };
-
-  // Newly opened edit dialogs fetch the model list when nothing was cached.
-  useEffect(() => {
-    if (initial && (initial.available_models?.length ?? 0) === 0) detect(false);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [initial]);
   const [inputCost, setInputCost] = useState(String(initial?.input_cost_per_1m ?? 0));
   const [outputCost, setOutputCost] = useState(String(initial?.output_cost_per_1m ?? 0));
   const [contextWindow, setContextWindow] = useState(String(initial?.context_window_tokens ?? 128000));
@@ -793,70 +893,18 @@ function ProviderDialog({
             />
           </Field>
 
-          <Field label="Model (auto-detected)">
-            <div className="flex items-center gap-2">
-              {models.length > 0 ? (
-                <select
-                  value={defaultModel}
-                  onChange={(e) => {
-                    setDefaultModel(e.target.value);
-                    setTestResult(null);
-                  }}
-                  className="w-full rounded-lg border border-zinc-200 bg-white px-3 py-2 font-mono text-sm"
-                >
-                  {defaultModel && !models.includes(defaultModel) && (
-                    <option value={defaultModel}>{defaultModel} (current)</option>
-                  )}
-                  {models.map((model) => (
-                    <option key={model} value={model}>
-                      {model}
-                    </option>
-                  ))}
-                </select>
-              ) : (
-                <input
-                  value={defaultModel}
-                  onChange={(e) => {
-                    setDefaultModel(e.target.value);
-                    setTestResult(null);
-                  }}
-                  placeholder="model name (e.g. gpt-4o-mini)"
-                  className="w-full rounded-lg border border-zinc-200 px-3 py-2 font-mono text-sm"
-                />
-              )}
-              <button
-                type="button"
-                onClick={() => detect(true)}
-                disabled={detectModels.isPending}
-                title="Fetch the models this provider reports"
-                className="shrink-0 rounded-lg border border-zinc-200 bg-white px-3 py-2 text-xs font-medium text-zinc-700 hover:bg-zinc-50 disabled:opacity-50"
-              >
-                {detectModels.isPending ? 'Detecting…' : 'Detect models'}
-              </button>
-            </div>
-            <div className="mt-2 flex flex-wrap items-center gap-2 text-xs">
-              <button
-                type="button"
-                onClick={runTest}
-                disabled={testModel.isPending || !defaultModel}
-                title="Send one minimal completion to this model"
-                className="rounded-lg border border-zinc-200 bg-white px-3 py-1.5 font-medium text-zinc-700 hover:bg-zinc-50 disabled:opacity-50"
-              >
-                {testModel.isPending ? 'Testing…' : 'Test model'}
-              </button>
-              {testResult ? (
-                <span className={testResult.success ? 'text-emerald-700' : 'text-rose-700'}>
-                  {testResult.success
-                    ? `OK in ${testResult.latency_ms} ms — ${testResult.detail}`
-                    : `Failed — ${testResult.detail}`}
-                </span>
-              ) : (
-                <span className="text-zinc-400">
-                  {defaultModel ? 'Selected model is used for assistant chats from the Workbench.' : 'Select a model before chatting from the Workbench.'}
-                </span>
-              )}
-            </div>
-          </Field>
+          <ModelPicker
+            label="Model (auto-detected)"
+            value={defaultModel}
+            onChange={setDefaultModel}
+            provider={initial}
+            inlineConfig={{
+              provider_type: providerType,
+              base_url: baseUrl.trim(),
+              api_key_env: apiKeyEnv.trim() || 'NONE',
+            }}
+          />
+
           <div className="grid grid-cols-3 gap-3">
             <Field label="Input $/1M">
               <input
@@ -932,6 +980,15 @@ function BeeDialog({
   const [modelName, setModelName] = useState(
     initial?.model_name ?? providers[0]?.default_model ?? '',
   );
+  const selectedProvider = providers.find((p) => p.id === providerId) ?? null;
+
+  const chooseProvider = (id: number) => {
+    setProviderId(id);
+    const provider = providers.find((p) => p.id === id);
+    if (provider && modelName && !provider.available_models?.includes(modelName)) {
+      setModelName(provider.default_model ?? provider.assistant_model ?? provider.available_models?.[0] ?? modelName);
+    }
+  };
   const [roleDescription, setRoleDescription] = useState(initial?.role_description ?? '');
   const [systemPrompt, setSystemPrompt] = useState(initial?.system_prompt ?? '');
   const [temperature, setTemperature] = useState(String(initial?.temperature ?? 0));
@@ -961,6 +1018,10 @@ function BeeDialog({
   const submit = async (e: React.FormEvent) => {
     e.preventDefault();
     setErr(null);
+    if (!modelName.trim()) {
+      setErr('Pick or type a model name before saving this Bee.');
+      return;
+    }
     try {
       await onSave(
         {
@@ -1000,7 +1061,7 @@ function BeeDialog({
             <Field label="Provider">
               <select
                 value={providerId}
-                onChange={(e) => setProviderId(Number(e.target.value))}
+                onChange={(e) => chooseProvider(Number(e.target.value))}
                 className="w-full rounded-lg border border-zinc-200 bg-white px-3 py-2 text-sm"
               >
                 {providers.map((p) => (
@@ -1011,16 +1072,8 @@ function BeeDialog({
               </select>
             </Field>
           </div>
-          <div className="grid grid-cols-3 gap-3">
-            <Field label="Model">
-              <input
-                required
-                value={modelName}
-                onChange={(e) => setModelName(e.target.value)}
-                placeholder="gpt-4o-mini"
-                className="w-full rounded-lg border border-zinc-200 px-3 py-2 font-mono text-xs"
-              />
-            </Field>
+          <ModelPicker label="Model (auto-detected)" value={modelName} onChange={setModelName} provider={selectedProvider} />
+          <div className="grid grid-cols-2 gap-3">
             <Field label="Temperature">
               <input
                 type="number"
@@ -1161,6 +1214,15 @@ function HiveDialog({
   const [modelName, setModelName] = useState(
     initial?.supervisor_model_name ?? providers[0]?.default_model ?? '',
   );
+  const selectedProvider = providers.find((p) => p.id === providerId) ?? null;
+
+  const chooseProvider = (id: number) => {
+    setProviderId(id);
+    const provider = providers.find((p) => p.id === id);
+    if (provider && modelName && !provider.available_models?.includes(modelName)) {
+      setModelName(provider.default_model ?? provider.available_models?.[0] ?? modelName);
+    }
+  };
   const [goalDesc, setGoalDesc] = useState(initial?.goal_description ?? '');
   const [supPrompt, setSupPrompt] = useState(initial?.supervisor_prompt ?? '');
   const [thinking, setThinking] = useState(initial?.supervisor_thinking_level ?? 'medium');
@@ -1176,6 +1238,10 @@ function HiveDialog({
   const submit = async (e: React.FormEvent) => {
     e.preventDefault();
     setErr(null);
+    if (!modelName.trim()) {
+      setErr('Pick or type a model name before saving this Hive.');
+      return;
+    }
     try {
       await onSave(
         {
@@ -1215,7 +1281,7 @@ function HiveDialog({
             <Field label="Supervisor Provider">
               <select
                 value={providerId}
-                onChange={(e) => setProviderId(Number(e.target.value))}
+                onChange={(e) => chooseProvider(Number(e.target.value))}
                 className="w-full rounded-lg border border-zinc-200 bg-white px-3 py-2 text-sm"
               >
                 {providers.map((p) => (
@@ -1226,29 +1292,24 @@ function HiveDialog({
               </select>
             </Field>
           </div>
-          <div className="grid grid-cols-2 gap-3">
-            <Field label="Supervisor Model">
-              <input
-                required
-                value={modelName}
-                onChange={(e) => setModelName(e.target.value)}
-                placeholder="gpt-4o"
-                className="w-full rounded-lg border border-zinc-200 px-3 py-2 font-mono text-xs"
-              />
-            </Field>
-            <Field label="Supervisor Thinking">
-              <select
-                value={thinking}
-                onChange={(e) => setThinking(e.target.value)}
-                className="w-full rounded-lg border border-zinc-200 bg-white px-3 py-2 text-sm"
-              >
-                <option value="off">off</option>
-                <option value="low">low</option>
-                <option value="medium">medium</option>
-                <option value="high">high</option>
-              </select>
-            </Field>
-          </div>
+          <ModelPicker
+            label="Supervisor Model (auto-detected)"
+            value={modelName}
+            onChange={setModelName}
+            provider={selectedProvider}
+          />
+          <Field label="Supervisor Thinking">
+            <select
+              value={thinking}
+              onChange={(e) => setThinking(e.target.value)}
+              className="w-full rounded-lg border border-zinc-200 bg-white px-3 py-2 text-sm"
+            >
+              <option value="off">off</option>
+              <option value="low">low</option>
+              <option value="medium">medium</option>
+              <option value="high">high</option>
+            </select>
+          </Field>
           <Field label="Goal Description">
             <input
               value={goalDesc}
