@@ -39,11 +39,38 @@ def get_engine() -> Engine:
         inspector = inspect(_engine)
         if "runs" in inspector.get_table_names():
             columns = {column["name"] for column in inspector.get_columns("runs")}
+            additions = {}
             if "artifacts_dir" not in columns:
+                additions["artifacts_dir"] = "VARCHAR(1024)"
+            if "container_name" not in columns:
+                additions["container_name"] = "VARCHAR(128)"
+            if additions:
+                with _engine.begin() as connection:
+                    for column_name, column_type in additions.items():
+                        connection.execute(
+                            text(f"ALTER TABLE runs ADD COLUMN {column_name} {column_type}")
+                        )
+        if "bees" in inspect(_engine).get_table_names():
+            columns = {column["name"] for column in inspect(_engine).get_columns("bees")}
+            if "require_approval" not in columns:
                 with _engine.begin() as connection:
                     connection.execute(
-                        text("ALTER TABLE runs ADD COLUMN artifacts_dir VARCHAR(1024)")
+                        text("ALTER TABLE bees ADD COLUMN require_approval JSON DEFAULT '[]'")
                     )
+        if "usage_events" in inspect(_engine).get_table_names():
+            usage_columns = {
+                column["name"] for column in inspect(_engine).get_columns("usage_events")
+            }
+            if usage_columns:
+                with _engine.begin() as connection:
+                    if "container_name" not in usage_columns:
+                        connection.execute(
+                            text("ALTER TABLE usage_events ADD COLUMN container_name VARCHAR(128)")
+                        )
+                    if "checkpoint_id" not in usage_columns:
+                        connection.execute(
+                            text("ALTER TABLE usage_events ADD COLUMN checkpoint_id VARCHAR(128)")
+                        )
     return _engine
 
 

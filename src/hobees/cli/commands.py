@@ -15,7 +15,39 @@ __all__ = ["CommandSpec", "COMMANDS", "TUI_COMMANDS"]
 # command name -> (description, sub-commands)
 CommandSpec = tuple[str, tuple[str, ...]]
 
-#: Every command understood by the legacy interactive shell.
+#: Vocabulary the approval-level command understands. Completion, `/help`,
+#: `hobees approvals --help` and the handlers all read these, so a suggestion can
+#: never be a word the handler would reject.
+APPROVAL_LEVELS: tuple[str, ...] = ("interactive", "auto", "strict", "pause")
+SHOW_WORD, SET_WORD, GLOBAL_WORD, DEFAULT_WORD, CLEAR_WORD = (
+    "show",
+    "set",
+    "global",
+    "default",
+    "clear",
+)
+APPROVAL_WORDS: tuple[str, ...] = (
+    SHOW_WORD,
+    SET_WORD,
+    GLOBAL_WORD,
+    DEFAULT_WORD,
+    CLEAR_WORD,
+) + APPROVAL_LEVELS
+
+APPROVAL_DESCRIPTION = (
+    "Set the tool approval level for this session; 'global <level>' persists it "
+    "(alias: /permissions)"
+)
+
+#: What each level does to a tool a Bee declared in `require_approval`.
+APPROVAL_LEVEL_MEANINGS: dict[str, str] = {
+    "interactive": "prompt for Approve / Edit / Reject (default on a TTY)",
+    "auto": "run without asking (trusted container, CI, cron)",
+    "strict": "never run it; return a policy rejection",
+    "pause": "checkpoint, print JSON, exit 0 for a later resume",
+}
+
+#: Every understood command + level, in suggestion order.
 COMMANDS: dict[str, CommandSpec] = {
     "provider": (
         "Manage LLM providers; 'models' lists a provider's models, 'use' switches to one, 'edit' edits details",
@@ -32,6 +64,8 @@ COMMANDS: dict[str, CommandSpec] = {
     "goal": ("Run a goal through the Queen (auto-mode)", ()),
     "usage": ("Query usage telemetry", ("all", "bee", "hive", "provider", "day")),
     "thinking": ("Set session-wide thinking level override", ("off", "low", "medium", "high", "auto")),
+    "approvals": (APPROVAL_DESCRIPTION, APPROVAL_WORDS),
+    "permissions": (APPROVAL_DESCRIPTION, APPROVAL_WORDS),
     "compact": ("Compress the active thread's message history", ()),
     "memory": ("Cross-session scoped memory store", ("list", "add", "forget", "show")),
     "skill": ("Progressive skill library", ("list", "show", "create", "save-last", "assign", "unassign", "sync")),
@@ -57,6 +91,8 @@ TUI_COMMANDS: dict[str, CommandSpec] = {
     "hive": COMMANDS["hive"],
     "chat": COMMANDS["chat"],
     "thinking": COMMANDS["thinking"],
+    "approvals": COMMANDS["approvals"],
+    "permissions": COMMANDS["permissions"],
     "clear": ("Clear the output pane", ()),
     "help": ("Show this help", ()),
     "quit": COMMANDS["quit"],

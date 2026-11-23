@@ -75,9 +75,15 @@ def test_tui_hive_turn_uses_run_id_for_telemetry(monkeypatch):
         async def __aexit__(self, *_args):
             return False
 
+    calls = []
+
+    def fake_hive_app(*args, approval_mode=None, **_kwargs):
+        calls.append((args, approval_mode))
+        return AsyncContext()
+
     monkeypatch.setattr(
         "hobees.core.hive_builder.hive_app_async",
-        lambda *args: calls.append(args) or AsyncContext(),
+        fake_hive_app,
     )
     monkeypatch.setattr(
         tui,
@@ -86,9 +92,12 @@ def test_tui_hive_turn_uses_run_id_for_telemetry(monkeypatch):
     )
     monkeypatch.setattr("hobees.db.analytics.run_thread_usage", lambda *_args: None)
 
+    tui.state.approval_mode = "auto"
     asyncio.run(tui._stream_hive_response("Do the work"))
 
-    assert calls[0][5] == run_id
+    assert calls[0][0][5] == run_id
+    # The session approval level must reach the graph, not just the command UI.
+    assert calls[0][1] == "auto"
 
 
 def test_tui_hive_chat_completion_harvests_skill_draft(monkeypatch):
