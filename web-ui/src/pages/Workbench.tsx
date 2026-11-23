@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { useNavigate, useSearchParams } from 'react-router-dom';
 import {
   AlertCircle,
@@ -9,13 +9,14 @@ import {
   Loader2,
   Paperclip,
   Play,
+  RefreshCw,
   Square,
   Users,
   X,
   Zap,
 } from 'lucide-react';
 import { useAppContext } from '../context/AppContext';
-import { useBees, useCreateRun, useHives } from '../hooks/useApi';
+import { useBees, useCreateRun, useDetectProviderModels, useHives, useProviders } from '../hooks/useApi';
 import type { TraceStreamEvent } from '../types';
 import { cn, copyText, isMac } from '../utils/helpers';
 
@@ -27,14 +28,17 @@ interface AttachedFile {
 export function Workbench() {
   const navigate = useNavigate();
   const [searchParams, setSearchParams] = useSearchParams();
-  const { readOnly, selectedContainer } = useAppContext();
+  const {
+    readOnly,
+    selectedContainer,
+    workbenchScope: scope,
+    setWorkbenchScope,
+    workbenchSelections,
+    setWorkbenchSelection,
+    workbenchModels,
+    setWorkbenchModel,
+  } = useAppContext();
 
-  const { data: hives = [] } = useHives();
-  const { data: bees = [] } = useBees();
-  const createRun = useCreateRun();
-
-  const [scope, setScope] = useState<'hive' | 'bee' | 'assistant'>('hive');
-  const [entityName, setEntityName] = useState('');
   const [approvalMode, setApprovalMode] = useState<'interactive' | 'auto' | 'strict' | 'pause'>('interactive');
   const [thinking, setThinking] = useState<'auto' | 'off' | 'low' | 'medium' | 'high'>('auto');
   const [prompt, setPrompt] = useState('');
@@ -54,29 +58,68 @@ export function Workbench() {
   const latestReplyRef = useRef<string>('');
   const fileInputRef = useRef<HTMLInputElement>(null);
 
-  const entities = scope === 'hive' ? hives : scope === 'bee' ? bees : [];
+  const { data: providers = [] } = useProviders();
+  const { data: hives = [] } = useHives();
+  const { data: bees = [] } = useBees();
+  const createRun = useCreateRun();
+  const detectModels = useDetectProviderModels();
+
+  const entities = useMemo(() => (scope === 'hive' ? hives : scope === 'bee' ? bees : []), [scope, hives, bees]);
+  /* Per-scope pickers come from the app context, so switching views or tabs no
+   * longer drops the selection back to the first entry in the list. */
+  const entityName = workbenchSelections[scope];
+
+  /* Assistant model options come from auto-detection (`available_models`) plus the
+   * provider's assistant/default model. The picked model is remembered per
+   * provider so it survives view changes and tab switches. */
+  const assistantProvider = useMemo(
+    () => (scope === 'assistant' ? providers.find((p) => String(p.id) === entityName) : undefined),
+    [scope, providers, entityName],
+  );
+  const modelOptions = useMemo(() => {
+    if (!assistantProvider) return [];
+    const options = [...(assistantProvider.available_models ?? [])];
+    for (const candidate of [assistantProvider.assistant_model, assistantProvider.default_model]) {
+      if (candidate && !options.includes(candidate)) options.push(candidate);
+    }
+    return options;
+  }, [assistantProvider]);
+  const assistantModel = useMemo(() => {
+    if (!assistantProvider) return '';
+    const remembered = workbenchModels[assistantProvider.alias];
+    if (remembered && modelOptions.includes(remembered)) return remembered;
+    return assistantProvider.assistant_model ?? assistantProvider.default_model ?? modelOptions[0] ?? '';
+  }, [assistantProvider, modelOptions, workbenchModels]);
 
   useEffect(() => {
     const threadParam = searchParams.get('thread');
     if (threadParam) {
       setContinueThreadId(threadParam);
       const parts = threadParam.split(':');
-      if (parts.length === 4 && (parts[1] === 'hive' || parts[1] === 'bee' || parts[1] === 'assistant')) {
-        setScope(parts[1]);
-        if (parts[1] !== 'assistant') setEntityName(parts[2]);
+      const scopePart = parts[1];
+      if (parts.length === 4 && (scopePart === 'hive' || scopePart === 'bee' || scopePart === 'assistant')) {
+        setWorkbenchScope(scopePart);
+        // Assistant threads carry `default` as the entity part, so the persisted
+        // provider selection is kept instead of being overwritten.
+        if (scopePart !== 'assistant') setWorkbenchSelection(scopePart, parts[2]);
       }
     }
-  }, [searchParams]);
+  }, [searchParams, setWorkbenchScope, setWorkbenchSelection]);
 
   useEffect(() => {
-    if (scope === 'assistant') {
-      setEntityName('default');
-    } else if (entities.length > 0 && !entities.some((e) => e.name === entityName)) {
-      setEntityName(entities[0].name);
-    } else if (entities.length === 0) {
-      setEntityName('');
+    // Only fall back to the first entry when the remembered selection is stale
+    // (nothing stored yet, or the provider/hive/bee was removed).
+    const available = scope === 'assistant' ? providers.map((p) => String(p.id)) : entities.map((e) => e.name);
+    if (available.length === 0 || available.includes(entityName)) return;
+    setWorkbenchSelection(scope, available[0]);
+  }, [scope, entityName, providers, entities, setWorkbenchSelection]);
+
+  useEffect(() => {
+    if (!assistantProvider || !assistantModel) return;
+    if (workbenchModels[assistantProvider.alias] !== assistantModel) {
+      setWorkbenchModel(assistantProvider.alias, assistantModel);
     }
-  }, [scope, entities, entityName]);
+  }, [assistantProvider, assistantModel, workbenchModels, setWorkbenchModel]);
 
   useEffect(() => {
     return () => {
@@ -132,6 +175,8 @@ export function Workbench() {
         container_name: selectedContainer !== 'all' ? selectedContainer : undefined,
         approval_mode: approvalMode,
         thinking: thinking === 'auto' ? undefined : thinking,
+        provider_id: scope === 'assistant' ? Number(entityName) : undefined,
+        model: scope === 'assistant' ? assistantModel || undefined : undefined,
       });
 
       setActiveThreadId(res.thread_id);
@@ -185,7 +230,9 @@ export function Workbench() {
     !readOnly &&
     !isRunning &&
     (prompt.trim().length > 0 || attachments.length > 0) &&
-    (scope === 'assistant' || Boolean(entityName));
+    (scope === 'assistant'
+      ? providers.length > 0 && Boolean(entityName) && Boolean(assistantModel)
+      : Boolean(entityName));
 
   return (
     <div className="mx-auto max-w-4xl px-4 py-8 sm:px-6 space-y-6">
@@ -227,15 +274,15 @@ export function Workbench() {
           <div className="inline-flex rounded-lg border border-zinc-200 bg-white p-0.5 text-xs font-medium">
             {(
               [
+                { id: 'assistant', label: 'Assistant', icon: Zap },
                 { id: 'hive', label: 'Hive', icon: Users },
                 { id: 'bee', label: 'Bee', icon: Bot },
-                { id: 'assistant', label: 'Assistant', icon: Zap },
               ] as const
             ).map((opt) => (
               <button
                 key={opt.id}
                 type="button"
-                onClick={() => setScope(opt.id)}
+                onClick={() => setWorkbenchScope(opt.id)}
                 className={cn(
                   'inline-flex items-center gap-1.5 rounded-md px-2.5 py-1 transition-colors',
                   scope === opt.id
@@ -249,11 +296,69 @@ export function Workbench() {
             ))}
           </div>
 
-          {/* Entity Picker */}
-          {scope !== 'assistant' && (
+          {/* Entity / Provider Picker */}
+          {scope === 'assistant' ? (
+            <div className="flex items-center gap-2">
+              <select
+                value={entityName}
+                onChange={(e) => setWorkbenchSelection('assistant', e.target.value)}
+                disabled={providers.length === 0}
+                aria-label="Select provider"
+                className="rounded-lg border border-zinc-200 bg-white px-2.5 py-1.5 text-xs font-medium text-zinc-800 focus:border-amber-500 focus:outline-none"
+              >
+                {providers.length === 0 ? (
+                  <option value="">No providers configured</option>
+                ) : (
+                  providers.map((p) => (
+                    <option key={String(p.id)} value={String(p.id)}>
+                      {p.alias} ({p.provider_type})
+                    </option>
+                  ))
+                )}
+              </select>
+
+              <select
+                value={assistantModel}
+                onChange={(e) => assistantProvider && setWorkbenchModel(assistantProvider.alias, e.target.value)}
+                disabled={!assistantProvider || modelOptions.length === 0}
+                aria-label="Select model"
+                title={
+                  assistantProvider
+                    ? assistantProvider.available_models.length
+                      ? `${assistantProvider.available_models.length} auto-detected models`
+                      : 'No models detected for this provider yet — detect them in Hive Studio'
+                    : 'Select a provider first'
+                }
+                className="rounded-lg border border-zinc-200 bg-white px-2.5 py-1.5 text-xs font-medium text-zinc-800 focus:border-amber-500 focus:outline-none"
+              >
+                {modelOptions.length === 0 ? (
+                  <option value="">No model detected</option>
+                ) : (
+                  modelOptions.map((model) => (
+                    <option key={model} value={model}>
+                      {model}
+                    </option>
+                  ))
+                )}
+              </select>
+
+              {assistantProvider && (
+                <button
+                  type="button"
+                  onClick={() => detectModels.mutate({ alias: assistantProvider.alias, refresh: true })}
+                  disabled={detectModels.isPending}
+                  aria-label="Re-detect models for the selected provider"
+                  title="Re-detect models for the selected provider"
+                  className="rounded-lg border border-zinc-200 bg-white p-1.5 text-zinc-500 hover:bg-zinc-100 hover:text-zinc-800 transition-colors"
+                >
+                  <RefreshCw className={cn('h-3.5 w-3.5', detectModels.isPending && 'animate-spin')} />
+                </button>
+              )}
+            </div>
+          ) : (
             <select
               value={entityName}
-              onChange={(e) => setEntityName(e.target.value)}
+              onChange={(e) => setWorkbenchSelection(scope, e.target.value)}
               disabled={entities.length === 0}
               aria-label="Select target"
               className="rounded-lg border border-zinc-200 bg-white px-2.5 py-1.5 text-xs font-medium text-zinc-800 focus:border-amber-500 focus:outline-none"
@@ -366,6 +471,11 @@ export function Workbench() {
               <Paperclip className="h-3.5 w-3.5" />
               Attach @file
             </button>
+            {scope === 'assistant' && providers.length > 0 && !assistantModel && (
+              <span className="text-xs font-medium text-amber-700">
+                Select a model — this provider has no detected or default model yet
+              </span>
+            )}
             {scope !== 'assistant' && entities.length === 0 && (
               <button
                 type="button"

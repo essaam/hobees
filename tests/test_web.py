@@ -6,13 +6,14 @@ import json
 import re
 from datetime import datetime, timezone
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 from fastapi.testclient import TestClient
 
 from hobees.config import settings
 from hobees.core.tracing import trace_filename
-from hobees.db.models import ApprovalEvent, Base, Run, UsageEvent
+from hobees.db.models import ApprovalEvent, Base, Bee, LLMProvider, Run, UsageEvent
 from hobees.db.session import dispose_engine, get_engine, session_scope
 from hobees.web.app import create_web_app
 
@@ -177,6 +178,163 @@ def test_studio_crud_and_yaml_roundtrip(web_env):
     )
     assert imp_res.status_code == 200
     assert imp_res.json()["success"] is True
+
+
+def test_provider_model_detection_caches_models_on_the_row(web_env, monkeypatch):
+    monkeypatch.setattr(
+        "hobees.core.model_discovery.fetch_provider_models",
+        lambda provider_row, refresh_cache=False: ["b-model", "a-model"],
+    )
+    client = TestClient(create_web_app())
+
+    client.post(
+        "/api/v1/providers",
+        json={
+            "alias": "detected-local",
+            "provider_type": "openai_compatible",
+            "base_url": "http://localhost:11434/v1",
+            "api_key_env": "NONE",
+            "input_cost_per_1m": 0.0,
+            "output_cost_per_1m": 0.0,
+            "context_window_tokens": 32000,
+        },
+    )
+
+    res = client.get("/api/v1/providers/models?alias=detected-local&refresh=true")
+    assert res.status_code == 200
+    body = res.json()
+    assert body["alias"] == "detected-local"
+    assert body["models"] == ["b-model", "a-model"]
+    assert body["persisted"] is True
+
+    row = [p for p in client.get("/api/v1/providers").json() if p["alias"] == "detected-local"][0]
+    assert row["available_models"] == ["b-model", "a-model"]
+
+    # An unsaved form can be probed too, without touching the database.
+    inline = client.get(
+        "/api/v1/providers/models?provider_type=openai_compatible&api_key_env=NONE"
+    ).json()
+    assert inline["alias"] is None
+    assert inline["persisted"] is False
+
+    # Read-only mode reports models but never writes them.
+    read_only = TestClient(create_web_app(read_only=True))
+    ro = read_only.get("/api/v1/providers/models?provider_type=openai_compatible&api_key_env=NONE").json()
+    assert ro["models"] == ["b-model", "a-model"]
+    assert ro["persisted"] is False
+
+
+def test_provider_model_test_endpoint_reports_reasons_inline(web_env, monkeypatch):
+    monkeypatch.delenv("HOBEES_TEST_MISSING_KEY", raising=False)
+
+    class FakeChat:
+        async def ainvoke(self, prompt: str):
+            return SimpleNamespace(content="OK")
+
+    monkeypatch.setattr("hobees.core.llm_factory.get_chat_model", lambda *args, **kwargs: FakeChat())
+
+    client = TestClient(create_web_app())
+
+    def make_provider(alias: str, api_key_env: str, default_model: str | None) -> dict:
+        return client.post(
+            "/api/v1/providers",
+            json={
+                "alias": alias,
+                "provider_type": "openai_compatible",
+                "base_url": "http://localhost:11434/v1",
+                "api_key_env": api_key_env,
+                "default_model": default_model,
+                "input_cost_per_1m": 0.0,
+                "output_cost_per_1m": 0.0,
+                "context_window_tokens": 32000,
+            },
+        ).json()
+
+    make_provider("test-ok", "NONE", None)
+    ok = client.post(
+        "/api/v1/providers/test",
+        json={"alias": "test-ok", "provider_type": "openai_compatible", "api_key_env": "NONE", "model": "a-model"},
+    )
+    assert ok.status_code == 200
+    assert ok.json()["success"] is True
+    assert ok.json()["model"] == "a-model"
+    assert "OK" in ok.json()["detail"]
+
+    make_provider("test-key", "HOBEES_TEST_MISSING_KEY", "z-model")
+    missing_key = client.post(
+        "/api/v1/providers/test",
+        json={"alias": "test-key", "provider_type": "openai_compatible", "api_key_env": "HOBEES_TEST_MISSING_KEY"},
+    ).json()
+    assert missing_key["success"] is False
+    assert "not set" in missing_key["detail"]
+
+    no_model = client.post(
+        "/api/v1/providers/test",
+        json={"alias": "test-ok", "provider_type": "openai_compatible", "api_key_env": "NONE"},
+    ).json()
+    assert no_model["success"] is False
+    assert "No model selected" in no_model["detail"]
+
+    assert client.post("/api/v1/providers/test", json={"provider_type": "gemini", "model": "x"}).status_code == 400
+
+    # The read-only guard blocks the POST test (mutating call).
+    read_only = TestClient(create_web_app(read_only=True))
+    assert read_only.post(
+        "/api/v1/providers/test",
+        json={"provider_type": "openai", "model": "x"},
+    ).status_code == 403
+
+    # Provider types are validated on create as well.
+    assert client.post(
+        "/api/v1/providers",
+        json={"alias": "bad-type", "provider_type": "gemini", "api_key_env": "NONE"},
+    ).status_code == 400
+
+
+def test_assistant_chat_requires_a_model_and_stores_the_selection(web_env, monkeypatch):
+    async def no_op_task(**kwargs):
+        return None
+
+    monkeypatch.setattr("hobees.web.app._run_single_bee_task", no_op_task)
+
+    client = TestClient(create_web_app())
+    provider = client.post(
+        "/api/v1/providers",
+        json={
+            "alias": "assistant-no-default",
+            "provider_type": "openai_compatible",
+            "base_url": "http://localhost:11434/v1",
+            "api_key_env": "NONE",
+            "input_cost_per_1m": 0.0,
+            "output_cost_per_1m": 0.0,
+            "context_window_tokens": 32000,
+        },
+    ).json()
+
+    missing = client.post(
+        "/api/v1/runs",
+        json={"scope": "assistant", "entity_name": "default", "prompt": "hello", "provider_id": provider["id"]},
+    )
+    assert missing.status_code == 400
+    assert "Pick a model" in missing.json()["detail"]
+
+    accepted = client.post(
+        "/api/v1/runs",
+        json={
+            "scope": "assistant",
+            "entity_name": "default",
+            "prompt": "hello",
+            "provider_id": provider["id"],
+            "model": "picked-model",
+        },
+    )
+    assert accepted.status_code == 200
+
+    with session_scope() as session:
+        assistant = session.query(Bee).filter_by(name="assistant").first()
+        assert assistant is not None
+        assert assistant.provider_id == provider["id"]
+        assert assistant.model_name == "picked-model"
 
 
 def test_trace_reconstruction_and_approval_resolution(web_env):

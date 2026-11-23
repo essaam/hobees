@@ -25,6 +25,27 @@ export interface Provider {
   output_cost_per_1m: number;
 }
 
+export interface ProviderModelsResponse {
+  alias: string | null;
+  models: string[];
+  persisted: boolean;
+}
+
+export interface ProviderModelTestRequest {
+  alias?: string | null;
+  provider_type: string;
+  base_url?: string | null;
+  api_key_env: string;
+  model?: string | null;
+}
+
+export interface ProviderModelTestResponse {
+  success: boolean;
+  detail: string;
+  model: string | null;
+  latency_ms: number;
+}
+
 export interface ProviderCreate {
   alias: string;
   provider_type: string;
@@ -155,6 +176,8 @@ export interface RunCreate {
   container_name?: string | null;
   approval_mode?: string | null;
   thinking?: string | null;
+  provider_id?: number | null;
+  model?: string | null;
 }
 
 export interface RunResponse {

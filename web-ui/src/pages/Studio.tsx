@@ -28,17 +28,19 @@ import {
   useDeleteHive,
   useDeleteProvider,
   useDeleteSkill,
+  useDetectProviderModels,
   useHives,
   useImportConfigYaml,
   useProviders,
   useSaveLastSkill,
   useSkills,
+  useTestProviderModel,
   useTools,
   useUpdateBee,
   useUpdateHive,
   useUpdateProvider,
 } from '../hooks/useApi';
-import type { Bee, Hive, Provider, ToolSchema } from '../types';
+import type { Bee, Hive, Provider, ProviderModelTestResponse, ToolSchema } from '../types';
 import { cn, copyText, downloadText } from '../utils/helpers';
 
 type StudioTab = 'hives' | 'bees' | 'providers' | 'skills';
@@ -659,6 +661,62 @@ function ProviderDialog({
   const [baseUrl, setBaseUrl] = useState(initial?.base_url ?? '');
   const [apiKeyEnv, setApiKeyEnv] = useState(initial?.api_key_env ?? 'OPENAI_API_KEY');
   const [defaultModel, setDefaultModel] = useState(initial?.default_model ?? '');
+  const [models, setModels] = useState<string[]>(initial?.available_models ?? []);
+  const [testResult, setTestResult] = useState<ProviderModelTestResponse | null>(null);
+  const detectModels = useDetectProviderModels();
+  const testModel = useTestProviderModel();
+
+  const detect = (refresh: boolean) => {
+    setErr(null);
+    detectModels.mutate(
+      initial
+        ? { alias: initial.alias, refresh }
+        : {
+            provider_type: providerType,
+            base_url: baseUrl.trim(),
+            api_key_env: apiKeyEnv.trim() || 'NONE',
+            refresh,
+          },
+      {
+        onSuccess: (res) => {
+          setModels(res.models);
+          if (res.models.length === 0) {
+            setErr('No models detected — check the base URL / API key env var, or type the model name.');
+          } else if (!models.includes(defaultModel)) {
+            setDefaultModel(defaultModel || res.models[0]);
+          }
+        },
+        onError: (ex) => setErr(ex instanceof Error ? ex.message : 'Model detection failed'),
+      },
+    );
+  };
+
+  const runTest = () => {
+    if (!defaultModel) {
+      setErr('Pick a model to test.');
+      return;
+    }
+    setTestResult(null);
+    testModel.mutate(
+      {
+        alias: initial?.alias ?? null,
+        provider_type: providerType,
+        base_url: baseUrl.trim() || null,
+        api_key_env: apiKeyEnv.trim() || 'NONE',
+        model: defaultModel,
+      },
+      {
+        onSuccess: (res) => setTestResult(res),
+        onError: (ex) => setErr(ex instanceof Error ? ex.message : 'Model test failed'),
+      },
+    );
+  };
+
+  // Newly opened edit dialogs fetch the model list when nothing was cached.
+  useEffect(() => {
+    if (initial && (initial.available_models?.length ?? 0) === 0) detect(false);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [initial]);
   const [inputCost, setInputCost] = useState(String(initial?.input_cost_per_1m ?? 0));
   const [outputCost, setOutputCost] = useState(String(initial?.output_cost_per_1m ?? 0));
   const [contextWindow, setContextWindow] = useState(String(initial?.context_window_tokens ?? 128000));
@@ -710,7 +768,7 @@ function ProviderDialog({
               >
                 <option value="openai">openai</option>
                 <option value="anthropic">anthropic</option>
-                <option value="gemini">gemini</option>
+                <option value="google_genai">google_genai (Gemini)</option>
                 <option value="openai_compatible">openai_compatible</option>
               </select>
             </Field>
@@ -725,25 +783,80 @@ function ProviderDialog({
               />
             </Field>
           )}
-          <div className="grid grid-cols-2 gap-3">
-            <Field label="API Key Env Var">
-              <input
-                required
-                value={apiKeyEnv}
-                onChange={(e) => setApiKeyEnv(e.target.value)}
-                placeholder="OPENAI_API_KEY or NONE"
-                className="w-full rounded-lg border border-zinc-200 px-3 py-2 font-mono text-xs"
-              />
-            </Field>
-            <Field label="Default Model">
-              <input
-                value={defaultModel}
-                onChange={(e) => setDefaultModel(e.target.value)}
-                placeholder="gpt-4o-mini"
-                className="w-full rounded-lg border border-zinc-200 px-3 py-2 font-mono text-xs"
-              />
-            </Field>
-          </div>
+          <Field label="API Key Env Var">
+            <input
+              required
+              value={apiKeyEnv}
+              onChange={(e) => setApiKeyEnv(e.target.value)}
+              placeholder="OPENAI_API_KEY or NONE"
+              className="w-full rounded-lg border border-zinc-200 px-3 py-2 font-mono text-xs"
+            />
+          </Field>
+
+          <Field label="Model (auto-detected)">
+            <div className="flex items-center gap-2">
+              {models.length > 0 ? (
+                <select
+                  value={defaultModel}
+                  onChange={(e) => {
+                    setDefaultModel(e.target.value);
+                    setTestResult(null);
+                  }}
+                  className="w-full rounded-lg border border-zinc-200 bg-white px-3 py-2 font-mono text-sm"
+                >
+                  {defaultModel && !models.includes(defaultModel) && (
+                    <option value={defaultModel}>{defaultModel} (current)</option>
+                  )}
+                  {models.map((model) => (
+                    <option key={model} value={model}>
+                      {model}
+                    </option>
+                  ))}
+                </select>
+              ) : (
+                <input
+                  value={defaultModel}
+                  onChange={(e) => {
+                    setDefaultModel(e.target.value);
+                    setTestResult(null);
+                  }}
+                  placeholder="model name (e.g. gpt-4o-mini)"
+                  className="w-full rounded-lg border border-zinc-200 px-3 py-2 font-mono text-sm"
+                />
+              )}
+              <button
+                type="button"
+                onClick={() => detect(true)}
+                disabled={detectModels.isPending}
+                title="Fetch the models this provider reports"
+                className="shrink-0 rounded-lg border border-zinc-200 bg-white px-3 py-2 text-xs font-medium text-zinc-700 hover:bg-zinc-50 disabled:opacity-50"
+              >
+                {detectModels.isPending ? 'Detecting…' : 'Detect models'}
+              </button>
+            </div>
+            <div className="mt-2 flex flex-wrap items-center gap-2 text-xs">
+              <button
+                type="button"
+                onClick={runTest}
+                disabled={testModel.isPending || !defaultModel}
+                title="Send one minimal completion to this model"
+                className="rounded-lg border border-zinc-200 bg-white px-3 py-1.5 font-medium text-zinc-700 hover:bg-zinc-50 disabled:opacity-50"
+              >
+                {testModel.isPending ? 'Testing…' : 'Test model'}
+              </button>
+              {testResult ? (
+                <span className={testResult.success ? 'text-emerald-700' : 'text-rose-700'}>
+                  {testResult.success
+                    ? `OK in ${testResult.latency_ms} ms — ${testResult.detail}`
+                    : `Failed — ${testResult.detail}`}
+                </span>
+              ) : (
+                <span className="text-zinc-400">
+                  {defaultModel ? 'Selected model is used for assistant chats from the Workbench.' : 'Select a model before chatting from the Workbench.'}
+                </span>
+              )}
+            </div>
+          </Field>
           <div className="grid grid-cols-3 gap-3">
             <Field label="Input $/1M">
               <input

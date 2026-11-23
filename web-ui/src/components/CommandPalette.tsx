@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import {
   Bot,
@@ -12,7 +12,7 @@ import {
   Users,
 } from 'lucide-react';
 import { useAppContext } from '../context/AppContext';
-import { useSaveLastSkill, useTraces } from '../hooks/useApi';
+import { useSaveLastSkill } from '../hooks/useApi';
 import { cn, isMac } from '../utils/helpers';
 
 interface PaletteAction {
@@ -26,20 +26,17 @@ interface PaletteAction {
 }
 
 export function CommandPalette() {
-  const { commandPaletteOpen, setCommandPaletteOpen, readOnly, selectedContainer } = useAppContext();
+  const { commandPaletteOpen, setCommandPaletteOpen, readOnly } = useAppContext();
   const navigate = useNavigate();
   const saveLastSkill = useSaveLastSkill();
-  const { data: recentTraces = [] } = useTraces({
-    container: selectedContainer,
-    limit: 6,
-  });
 
   const [query, setQuery] = useState('');
   const [selectedIdx, setSelectedIdx] = useState(0);
   const inputRef = useRef<HTMLInputElement>(null);
+  const listRef = useRef<HTMLDivElement>(null);
 
-  const actions = useMemo<PaletteAction[]>(() => {
-    const base: PaletteAction[] = [
+  const base = useMemo<PaletteAction[]>(
+    () => [
       {
         id: 'workbench',
         label: 'Run a Goal (Workbench)',
@@ -112,19 +109,13 @@ export function CommandPalette() {
         icon: <Database className="h-4 w-4 text-zinc-500" />,
         run: () => navigate('/storage'),
       },
-    ];
+    ],
+    [navigate, saveLastSkill],
+  );
 
-    const traceItems: PaletteAction[] = recentTraces.map((t) => ({
-      id: `trace-${t.thread_id}`,
-      label: t.goal ? `Trace: ${t.goal.slice(0, 48)}` : `Trace: ${t.thread_id}`,
-      cli: `hobees trace --thread ${t.thread_id}`,
-      category: 'Recent Threads',
-      icon: <GitBranch className="h-4 w-4 text-zinc-400" />,
-      run: () => navigate(`/traces/${encodeURIComponent(t.thread_id)}`),
-    }));
-
-    return [...base.filter((a) => !readOnly || !a.mutating), ...traceItems];
-  }, [navigate, readOnly, recentTraces, saveLastSkill]);
+  const actions = useMemo<PaletteAction[]>(() => {
+    return base.filter((a) => !readOnly || !a.mutating);
+  }, [base, readOnly]);
 
   const filtered = useMemo(() => {
     const q = query.trim().toLowerCase();
@@ -137,18 +128,46 @@ export function CommandPalette() {
     );
   }, [actions, query]);
 
-  useEffect(() => {
-    const onGlobalKey = (e: KeyboardEvent) => {
+  // Single keydown path: the palette handles keys itself when focus is inside it
+  // (input, row, or the dialog), and the window listener covers focus anywhere
+  // else. The `defaultPrevented` guard keeps a key from being handled twice.
+  const handleKey = useCallback(
+    (e: KeyboardEvent) => {
+      if (e.defaultPrevented) return;
       if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'k') {
         e.preventDefault();
         setCommandPaletteOpen(!commandPaletteOpen);
-      } else if (e.key === 'Escape' && commandPaletteOpen) {
+        return;
+      }
+      if (!commandPaletteOpen) return;
+      if (e.key === 'Escape') {
+        e.preventDefault();
+        setCommandPaletteOpen(false);
+        return;
+      }
+      if (e.key === 'ArrowDown' && filtered.length > 0) {
+        e.preventDefault();
+        setSelectedIdx((i) => Math.min(i + 1, filtered.length - 1));
+        return;
+      }
+      if (e.key === 'ArrowUp' && filtered.length > 0) {
+        e.preventDefault();
+        setSelectedIdx((i) => Math.max(i - 1, 0));
+        return;
+      }
+      if (e.key === 'Enter' && filtered[selectedIdx]) {
+        e.preventDefault();
+        filtered[selectedIdx].run();
         setCommandPaletteOpen(false);
       }
-    };
-    window.addEventListener('keydown', onGlobalKey);
-    return () => window.removeEventListener('keydown', onGlobalKey);
-  }, [commandPaletteOpen, setCommandPaletteOpen]);
+    },
+    [commandPaletteOpen, setCommandPaletteOpen, filtered, selectedIdx],
+  );
+
+  useEffect(() => {
+    window.addEventListener('keydown', handleKey);
+    return () => window.removeEventListener('keydown', handleKey);
+  }, [handleKey]);
 
   useEffect(() => {
     if (commandPaletteOpen) {
@@ -162,23 +181,18 @@ export function CommandPalette() {
     setSelectedIdx(0);
   }, [query]);
 
-  if (!commandPaletteOpen) return null;
+  // Keep the highlight inside the list when the filtered set shrinks.
+  useEffect(() => {
+    setSelectedIdx((i) => Math.min(i, Math.max(0, filtered.length - 1)));
+  }, [filtered.length]);
 
-  const handleKeyDown = (e: React.KeyboardEvent) => {
-    if (e.key === 'ArrowDown') {
-      e.preventDefault();
-      setSelectedIdx((i) => Math.min(i + 1, Math.max(0, filtered.length - 1)));
-    } else if (e.key === 'ArrowUp') {
-      e.preventDefault();
-      setSelectedIdx((i) => Math.max(i - 1, 0));
-    } else if (e.key === 'Enter' && filtered[selectedIdx]) {
-      e.preventDefault();
-      filtered[selectedIdx].run();
-      setCommandPaletteOpen(false);
-    } else if (e.key === 'Escape') {
-      setCommandPaletteOpen(false);
-    }
-  };
+  useEffect(() => {
+    if (!commandPaletteOpen) return;
+    const active = listRef.current?.querySelector('[data-active="true"]');
+    if (active) active.scrollIntoView({ block: 'nearest' });
+  }, [commandPaletteOpen, selectedIdx, filtered]);
+
+  if (!commandPaletteOpen) return null;
 
   return (
     <div
@@ -188,15 +202,22 @@ export function CommandPalette() {
       <div
         className="w-full max-w-xl overflow-hidden rounded-2xl border border-zinc-200 bg-white shadow-2xl"
         onClick={(e) => e.stopPropagation()}
+        onKeyDown={(e) => handleKey(e.nativeEvent)}
       >
         <div className="flex items-center gap-3 border-b border-zinc-100 px-4 py-3">
           <Search className="h-4 w-4 text-zinc-400" />
           <input
             ref={inputRef}
+            autoFocus
             type="text"
             value={query}
             onChange={(e) => setQuery(e.target.value)}
-            onKeyDown={handleKeyDown}
+            aria-label="Search commands"
+            role="combobox"
+            aria-controls="command-palette-list"
+            aria-expanded="true"
+            aria-haspopup="listbox"
+            aria-activedescendant={filtered.length > 0 ? `command-palette-option-${selectedIdx}` : undefined}
             placeholder="Search commands, CLI equivalents, or jump to a thread..."
             className="w-full bg-transparent text-sm text-zinc-900 placeholder:text-zinc-400 focus:outline-none"
           />
@@ -205,7 +226,13 @@ export function CommandPalette() {
           </kbd>
         </div>
 
-        <div className="max-h-80 overflow-y-auto py-1.5">
+        <div
+          ref={listRef}
+          id="command-palette-list"
+          role="listbox"
+          aria-label="Command results"
+          className="max-h-80 overflow-y-auto py-1.5"
+        >
           {filtered.length === 0 ? (
             <div className="px-4 py-8 text-center text-sm text-zinc-400">
               No matching commands
@@ -214,6 +241,10 @@ export function CommandPalette() {
             filtered.map((item, idx) => (
               <button
                 key={item.id}
+                id={`command-palette-option-${idx}`}
+                role="option"
+                aria-selected={idx === selectedIdx}
+                data-active={idx === selectedIdx}
                 type="button"
                 onMouseEnter={() => setSelectedIdx(idx)}
                 onClick={() => {
@@ -238,7 +269,7 @@ export function CommandPalette() {
         </div>
 
         <div className="flex items-center justify-between border-t border-zinc-100 bg-zinc-50/70 px-4 py-2 text-[11px] text-zinc-400">
-          <span>↑↓ navigate · Enter run</span>
+          <span>Type to filter · Enter to run</span>
           <span>{isMac() ? '⌘K' : 'Ctrl+K'} toggle</span>
         </div>
       </div>

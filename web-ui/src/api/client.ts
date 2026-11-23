@@ -15,6 +15,9 @@ import type {
   MemoryListResponse,
   Provider,
   ProviderCreate,
+  ProviderModelTestRequest,
+  ProviderModelTestResponse,
+  ProviderModelsResponse,
   ProviderUpdate,
   ReplayRequest,
   ReplayResponse,
@@ -86,6 +89,29 @@ export const api = {
   deleteProvider: (alias: string) =>
     request<{ success: boolean }>(`/providers/${encodeURIComponent(alias)}`, {
       method: 'DELETE',
+    }),
+
+  detectModels: (params: {
+    alias?: string;
+    provider_type?: string;
+    base_url?: string;
+    api_key_env?: string;
+    refresh?: boolean;
+  }) => {
+    const sp = new URLSearchParams();
+    if (params.alias) sp.set('alias', params.alias);
+    if (params.provider_type) sp.set('provider_type', params.provider_type);
+    if (params.base_url) sp.set('base_url', params.base_url);
+    if (params.api_key_env) sp.set('api_key_env', params.api_key_env);
+    if (params.refresh) sp.set('refresh', 'true');
+    const qs = sp.toString();
+    return request<ProviderModelsResponse>(`/providers/models${qs ? `?${qs}` : ''}`);
+  },
+
+  testModel: (body: ProviderModelTestRequest) =>
+    request<ProviderModelTestResponse>('/providers/test', {
+      method: 'POST',
+      body: JSON.stringify(body),
     }),
 
   getBees: () => request<Bee[]>('/bees'),

@@ -15,6 +15,7 @@ import logging
 import mimetypes
 import os
 import tempfile
+import time
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
@@ -57,6 +58,8 @@ from hobees.db.models import (
 from hobees.db.session import get_engine, session_scope
 
 logger = logging.getLogger(__name__)
+
+VALID_PROVIDER_TYPES = ("openai", "anthropic", "google_genai", "openai_compatible")
 
 # Guard against broken Windows registry MIME mappings for ES modules / CSS / SVG.
 mimetypes.add_type("application/javascript", ".js")
@@ -118,6 +121,33 @@ class ProviderUpdate(BaseModel):
     input_cost_per_1m: Optional[float] = None
     output_cost_per_1m: Optional[float] = None
     context_window_tokens: Optional[int] = None
+
+
+class ProviderModelsResponse(BaseModel):
+    alias: Optional[str] = None
+    models: list[str] = Field(default_factory=list)
+    persisted: bool = False
+
+
+class ProviderModelTestRequest(BaseModel):
+    """Provider config for a model health-check (parity with ``/provider test``).
+
+    ``alias`` targets an already-registered provider; otherwise the inline
+    config is used, so a provider can be validated before it is saved.
+    """
+
+    alias: Optional[str] = None
+    provider_type: str
+    base_url: Optional[str] = None
+    api_key_env: str = "NONE"
+    model: Optional[str] = None
+
+
+class ProviderModelTestResponse(BaseModel):
+    success: bool
+    detail: str
+    model: Optional[str] = None
+    latency_ms: int = 0
 
 
 class BeeResponse(BaseModel):
@@ -227,6 +257,8 @@ class RunCreate(BaseModel):
     container_name: Optional[str] = None
     approval_mode: Optional[str] = None
     thinking: Optional[str] = None
+    provider_id: Optional[int] = None
+    model: Optional[str] = None
 
 
 class RunResponse(BaseModel):
@@ -1234,6 +1266,139 @@ def create_web_app(read_only: bool = False) -> FastAPI:
 
     # --- Providers ---
 
+    @app.get("/api/v1/providers/models", response_model=ProviderModelsResponse)
+    async def discover_provider_models(
+        alias: Optional[str] = None,
+        provider_type: Optional[str] = None,
+        base_url: Optional[str] = None,
+        api_key_env: Optional[str] = None,
+        refresh: bool = Query(False),
+    ):
+        """Auto-detect the models a provider serves (parity with `/provider models`).
+
+        With an `alias` the stored provider row is probed and the result is cached
+        on that row; a form that has not been saved yet can be checked by passing
+        the inline config instead.
+        """
+        from hobees.core.model_discovery import fetch_provider_models
+
+        stored_alias: Optional[str] = None
+        if alias:
+            with session_scope() as session:
+                provider = session.query(LLMProvider).filter_by(alias=alias).first()
+                if not provider:
+                    raise HTTPException(404, f"Provider '{alias}' not found")
+                stored_alias = provider.alias
+                probe = {
+                    "alias": provider.alias,
+                    "provider_type": provider.provider_type,
+                    "base_url": provider.base_url,
+                    "api_key_env": provider.api_key_env,
+                }
+        elif provider_type:
+            probe = {
+                "alias": alias or "",
+                "provider_type": provider_type,
+                "base_url": base_url,
+                "api_key_env": api_key_env or "NONE",
+            }
+        else:
+            raise HTTPException(400, "Provide an existing provider alias or a provider_type.")
+
+        models = await asyncio.to_thread(fetch_provider_models, probe, refresh)
+
+        persisted = False
+        if models and stored_alias and not read_only:
+            with session_scope() as session:
+                provider = session.query(LLMProvider).filter_by(alias=stored_alias).first()
+                if provider:
+                    provider.available_models = models
+                    provider.models_refreshed_at = datetime.now(timezone.utc)
+                    persisted = True
+
+        return ProviderModelsResponse(alias=stored_alias, models=models, persisted=persisted)
+
+    @app.post("/api/v1/providers/test", response_model=ProviderModelTestResponse)
+    async def test_provider_model(body: ProviderModelTestRequest):
+        """Health-check a provider config and run one minimal completion.
+
+        Failures are returned as `{success: false, detail: ...}` rather than as
+        HTTP errors, so the Studio form can show the reason inline.
+        """
+        from types import SimpleNamespace
+
+        from hobees.core.llm_factory import get_chat_model, resolve_api_key
+        from hobees.core.streaming import message_content
+
+        if body.provider_type not in VALID_PROVIDER_TYPES:
+            raise HTTPException(
+                400,
+                f"provider_type must be one of {', '.join(VALID_PROVIDER_TYPES)}",
+            )
+
+        row = SimpleNamespace(
+            alias=body.alias or "",
+            provider_type=body.provider_type,
+            base_url=body.base_url,
+            api_key_env=body.api_key_env or "NONE",
+            default_model=None,
+            assistant_model=None,
+        )
+        model_name = (body.model or "").strip()
+
+        if body.alias:
+            with session_scope() as session:
+                provider = session.query(LLMProvider).filter_by(alias=body.alias).first()
+                if not provider:
+                    raise HTTPException(404, f"Provider '{body.alias}' not found")
+                row = SimpleNamespace(
+                    alias=provider.alias,
+                    provider_type=provider.provider_type,
+                    base_url=provider.base_url,
+                    api_key_env=provider.api_key_env,
+                    default_model=provider.default_model,
+                    assistant_model=provider.assistant_model,
+                )
+                model_name = model_name or (provider.assistant_model or provider.default_model or "")
+
+        if not model_name:
+            return ProviderModelTestResponse(
+                success=False,
+                detail="No model selected. Pick one of the detected models.",
+            )
+
+        if row.api_key_env != "NONE" and not resolve_api_key(row):
+            return ProviderModelTestResponse(
+                success=False,
+                model=model_name,
+                detail=(
+                    f"Provider config is OK, but env var {row.api_key_env!r} "
+                    "is not set in this environment."
+                ),
+            )
+
+        started = time.monotonic()
+        try:
+            chat = get_chat_model(row, model_name, 0.0, thinking_level="off")
+            reply = await chat.ainvoke("Reply with exactly: OK")
+            latency_ms = int((time.monotonic() - started) * 1000)
+            text = message_content(reply).strip()
+            return ProviderModelTestResponse(
+                success=True,
+                model=model_name,
+                latency_ms=latency_ms,
+                detail=text or "Model responded.",
+            )
+        except Exception as exc:
+            return ProviderModelTestResponse(
+                success=False,
+                model=model_name,
+                latency_ms=int((time.monotonic() - started) * 1000),
+                detail=f"{type(exc).__name__}: {exc}",
+            )
+
+    # --- Providers ---
+
     @app.get("/api/v1/providers", response_model=list[ProviderResponse])
     async def list_providers():
         with session_scope() as session:
@@ -1242,6 +1407,10 @@ def create_web_app(read_only: bool = False) -> FastAPI:
 
     @app.post("/api/v1/providers", response_model=ProviderResponse)
     async def create_provider(provider: ProviderCreate):
+        if provider.provider_type not in VALID_PROVIDER_TYPES:
+            raise HTTPException(
+                400, f"provider_type must be one of {', '.join(VALID_PROVIDER_TYPES)}"
+            )
         with session_scope() as session:
             if session.query(LLMProvider).filter_by(alias=provider.alias).first():
                 raise HTTPException(400, f"Provider '{provider.alias}' already exists")
@@ -1636,23 +1805,43 @@ def create_web_app(read_only: bool = False) -> FastAPI:
                     raise HTTPException(404, f"Bee '{entity_name}' not found")
                 bee_id = bee.id
             else:  # assistant
+                provider = (
+                    session.get(LLMProvider, run.provider_id)
+                    if run.provider_id
+                    else session.query(LLMProvider).order_by(LLMProvider.id).first()
+                )
+                if not provider:
+                    raise HTTPException(400, "No LLM providers configured. Add a provider in Hive Studio first.")
+
+                # A model picked in the Workbench wins; otherwise fall back to the
+                # provider's assistant/default model. Without any of them the run
+                # cannot start, so the error names the missing selection instead of
+                # guessing a model that the provider does not serve.
+                model_name = (run.model or "").strip() or (provider.assistant_model or provider.default_model or "").strip()
+                if not model_name:
+                    raise HTTPException(
+                        400,
+                        f"Pick a model for provider '{provider.alias}' — it has no assistant or default "
+                        "model. Use the Workbench model picker, or detect models in Hive Studio.",
+                    )
+
                 assistant = session.query(Bee).filter_by(name="assistant").first()
                 if not assistant:
-                    provider = session.query(LLMProvider).order_by(LLMProvider.id).first()
-                    if not provider:
-                        raise HTTPException(400, "No LLM providers configured. Add a provider in Hive Studio first.")
                     assistant = Bee(
                         name="assistant",
                         role_description="General-purpose assistant.",
                         system_prompt="You are a helpful AI assistant.",
                         provider_id=provider.id,
-                        model_name=provider.assistant_model or provider.default_model or "gpt-4o-mini",
+                        model_name=model_name,
                         temperature=0.7,
                         thinking_level="off",
                         tool_names=["read_file", "write_file", "list_directory", "run_python_calc", "save_memory", "recall_memory"],
                     )
                     session.add(assistant)
                     session.flush()
+                else:
+                    assistant.provider_id = provider.id
+                    assistant.model_name = model_name
                 bee_id = assistant.id
 
             existing_run = session.query(Run).filter_by(thread_id=thread_id).first()

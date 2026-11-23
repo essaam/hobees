@@ -4,6 +4,7 @@ import type {
   ApprovalResolveRequest,
   BeeUpdate,
   HiveUpdate,
+  ProviderModelTestRequest,
   ProviderUpdate,
   ReplayRequest,
 } from '../types';
@@ -51,6 +52,24 @@ export function useDeleteProvider() {
     mutationFn: api.deleteProvider,
     onSuccess: () => qc.invalidateQueries({ queryKey: ['providers'] }),
   });
+}
+
+export function useDetectProviderModels() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (params: {
+      alias?: string;
+      provider_type?: string;
+      base_url?: string;
+      api_key_env?: string;
+      refresh?: boolean;
+    }) => api.detectModels(params),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ['providers'] }),
+  });
+}
+
+export function useTestProviderModel() {
+  return useMutation({ mutationFn: (body: ProviderModelTestRequest) => api.testModel(body) });
 }
 
 export function useBees() {
