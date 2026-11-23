@@ -63,6 +63,16 @@ def test_command_palette_handles_arrow_keys_from_any_focus():
     assert "↑↓" not in palette
 
 
+def test_workbench_surfaces_gates_open_on_its_own_run():
+    workbench = read("pages/Workbench.tsx")
+    assert "pendingApprovals" in workbench
+    assert "sessionApprovals" in workbench
+    assert "a.thread_id === activeThreadId" in workbench
+    assert "Gate open on this run" in workbench
+    assert "ApprovalActionCard" in workbench
+    assert "Awaiting approval" in workbench
+
+
 def test_workbench_session_state_is_kept_in_the_app_context():
     context = read("context/AppContext.tsx")
     assert "WorkbenchSession" in context

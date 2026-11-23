@@ -6,6 +6,7 @@ from hobees.core.tool_registry import (
     get_tools,
     run_python_calc,
     set_thread_context,
+    unknown_tool_names,
 )
 
 
@@ -34,6 +35,15 @@ def test_namespaced_thread_path_is_reported_as_an_error_not_raised(tmp_path):
         {"path": "scratchpad/worker:hive:dev-team/c1.txt"}
     )
     assert result.startswith("ERROR:")
+
+
+def test_a_gate_on_an_unregistered_tool_can_never_fire():
+    # `get_tools()` skips unknown names, so a Bee can never be gated on a tool it
+    # cannot call. The docs example gated `run_shell`, which is not registered.
+    assert unknown_tool_names(["read_file", "write_file"]) == []
+    assert unknown_tool_names(["run_shell"]) == ["run_shell"]
+    assert unknown_tool_names(None) == []
+    assert get_tools(["run_shell"]) == []
 
 
 def test_tool_registry_registration():

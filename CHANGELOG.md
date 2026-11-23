@@ -27,6 +27,14 @@ to a heading matching that version and add the release date.
   preview a Bee is shown now names the directory it can actually read back, and
   tool path resolution returns `ERROR:` for a path that cannot exist on the
   platform instead of raising `OSError` (`[WinError 123]`) during a run.
+- Web UI: the Workbench now shows a gate that is open on the run it is watching
+  (Approve / Edit / Reject inline, plus an `Awaiting approval` status), instead of
+  only in the Approvals drawer.
+- CLI: `hobees bee create` and `hobees bee update` accept `--approval`, so a gate can
+  be declared without going through a config file. `hobees import` and the shared Bee
+  handlers now warn when `require_approval` names a tool that is not in the tool
+  registry — a gate on an unregistered tool can never fire (the README example used
+  `run_shell`, which is not a built-in tool).
 - Web UI: the last Workbench state is kept per scope in the app context (thread,
   activity feed, reply, prompt), so returning to the view shows the same run
   instead of restarting it; a run that was still going is rejoined on return, and

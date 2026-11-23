@@ -95,7 +95,11 @@ Keep `./artifacts` and `./skills` mounted when testing features that write files
 - Put orchestration logic in `src/hobees/core/`, persistence in `src/hobees/db/`, and CLI/API presentation in their respective packages.
 - Add or update pytest coverage for new behavior and bug fixes.
 - Update README sections and examples when user-visible behavior changes.
-- Do not log or persist provider credentials.
+- A `require_approval` gate can only fire for a tool the Bee declares in `tools`
+  *and* that exists in `TOOL_REGISTRY`; `hobees import`, `hobees bee create`/`update`
+  and the shared Bee handlers warn when it does not, because such a gate can never
+  be reached. `hobees approvals`/`/approvals` and the Web UI show pending gates;
+  `strict` resolves them by rejection without prompting, by design.
 - Do not alter or delete existing user data, database volumes, or unrelated generated files.
 
 ## Pull Requests

@@ -16,6 +16,7 @@ from rich.table import Table
 from rich.prompt import Confirm
 
 from hobees.cli.icons import SUCCESS, ERROR, WARN, APP, BEE, HIVE, MEMORY, SKILL
+from hobees.core.tool_registry import unknown_tool_names
 
 console = Console()
 
@@ -183,6 +184,13 @@ def _import_bees(config: dict, provider_alias_to_id: Dict[str, int], dry_run: bo
                 console.print(
                     f"{WARN} Bee {name!r}: require_approval contains tools outside tools: "
                     f"{', '.join(unknown)}"
+                )
+            not_registered = unknown_tool_names(require_approval)
+            if not_registered:
+                console.print(
+                    f"{WARN} Bee {name!r}: require_approval names tools that are not in the "
+                    f"tool registry ({', '.join(not_registered)}) — a gate on an unregistered "
+                    "tool can never fire"
                 )
 
             existing = session.query(Bee).filter_by(name=name).first()

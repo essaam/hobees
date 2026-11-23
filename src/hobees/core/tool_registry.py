@@ -243,6 +243,17 @@ for name, tool_obj in _BASE_TOOLS.items():
         TOOL_REGISTRY[name] = tool_obj
 
 
+def unknown_tool_names(names: list[str] | None) -> list[str]:
+    """Tool names that are not registered.
+
+    A Bee can only be gated on a tool it can actually call: `get_tools()` skips
+    unknown names, so a `require_approval` entry that is not in
+    :data:`TOOL_REGISTRY` can never fire (the README examples used `run_shell`,
+    which is not a built-in tool).
+    """
+    return [name for name in (names or []) if name not in TOOL_REGISTRY]
+
+
 def get_tools(tool_names: list[str] | None) -> list[BaseTool]:
     """Return the registered :class:`BaseTool` instances for the given names.
 
@@ -276,6 +287,7 @@ __all__ = [
     "recall_memory",
     "TOOL_REGISTRY",
     "get_tools",
+    "unknown_tool_names",
     "get_skill_metadata",
     "set_thread_context",
 ]

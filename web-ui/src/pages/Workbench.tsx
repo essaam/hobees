@@ -16,6 +16,7 @@ import {
   Zap,
 } from 'lucide-react';
 import { useAppContext, type WorkbenchSession } from '../context/AppContext';
+import { ApprovalActionCard } from '../components/ApprovalActionCard';
 import { useBees, useCreateRun, useDetectProviderModels, useHives, useProviders } from '../hooks/useApi';
 import type { TraceStreamEvent } from '../types';
 import { cn, copyText, isMac } from '../utils/helpers';
@@ -31,6 +32,7 @@ export function Workbench() {
   const {
     readOnly,
     selectedContainer,
+    pendingApprovals,
     workbenchScope: scope,
     setWorkbenchScope,
     workbenchSelections,
@@ -255,6 +257,12 @@ export function Workbench() {
       setSession({ error: err instanceof Error ? err.message : 'Failed to start run', running: false });
     }
   };
+
+  /* Gates that are still open for this run. ApprovalMiddleware only fires for a
+   * tool the Bee actually declares in `require_approval` AND can call, so an empty
+   * gate list means nothing to approve — the pending approvals for the current
+   * session are shown here as well as in the drawer. */
+  const sessionApprovals = pendingApprovals.filter((a) => a.thread_id === activeThreadId);
 
   const canRun =
     !readOnly &&
@@ -557,7 +565,7 @@ export function Workbench() {
                 <CheckCircle2 className="h-4 w-4 text-emerald-600" />
               )}
               <span className="text-xs font-semibold text-zinc-800">
-                {isRunning ? 'Running' : runError ? 'Failed' : 'Completed'}
+                {isRunning ? (sessionApprovals.length > 0 ? 'Awaiting approval' : 'Running') : runError ? 'Failed' : 'Completed'}
               </span>
               {activeThreadId && (
                 <button
@@ -598,6 +606,18 @@ export function Workbench() {
               )}
             </div>
           </div>
+
+          {sessionApprovals.length > 0 && (
+            <div className="border-b border-amber-100 bg-amber-50/40 px-4 py-3 space-y-3">
+              <p className="text-xs font-medium text-amber-800">
+                Gate open on this run ({sessionApprovals.length}) — approve, edit or reject to
+                resume the thread
+              </p>
+              {sessionApprovals.map((approval) => (
+                <ApprovalActionCard key={approval.id} approval={approval} />
+              ))}
+            </div>
+          )}
 
           {runError && (
             <div className="border-b border-rose-100 bg-rose-50/70 px-4 py-3 font-mono text-xs text-rose-700 whitespace-pre-wrap">

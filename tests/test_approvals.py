@@ -66,6 +66,30 @@ def plain(output: str) -> str:
     return " ".join(re.sub(r"\x1b\[[0-9;]*m", "", output).split())
 
 
+def test_a_gate_can_only_be_declared_on_a_registered_tool():
+    from hobees.cli.bee_cmd import cmd_bee_create
+
+    try:
+        cmd_bee_create(
+            "gate-test",
+            "Writes files",
+            "Use write_file when asked.",
+            1,
+            "model",
+            0.0,
+            "write_file",
+            "off",
+            "write_file,run_shell",
+        )
+    except Exception as exc:  # provider id 1 does not exist -> typer.Exit
+        assert getattr(exc, "exit_code", None) == 1
+
+    out = capsys.readouterr().out
+    assert "not in the tool registry" in out
+    assert "run_shell" in out
+    assert "can never fire" in out
+
+
 def test_normalise_and_scope_parsing():
     assert normalize_level("  AUTO  ") == "auto"
     assert normalize_level("yes-please") is None
