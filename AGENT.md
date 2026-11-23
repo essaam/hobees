@@ -86,6 +86,11 @@ Keep `./artifacts` and `./skills` mounted when testing features that write files
 ## Change Guidelines
 
 - Follow existing Python, Typer, Pydantic, SQLAlchemy, and LangGraph patterns.
+- Path segments derived from a namespaced thread key (trace JSONL names, the
+  scratchpad directory for offloaded tool output) go through
+  `hobees.core.paths.safe_path_component()` so they remain legal on Windows and
+  the path a Bee is shown is the path it can read back. Tool path resolution
+  reports `ERROR:` instead of raising for a path that cannot exist on the host.
 - Use focused edits and preserve public CLI behavior.
 - Put orchestration logic in `src/hobees/core/`, persistence in `src/hobees/db/`, and CLI/API presentation in their respective packages.
 - Add or update pytest coverage for new behavior and bug fixes.
