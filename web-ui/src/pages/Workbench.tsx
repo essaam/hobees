@@ -15,7 +15,7 @@ import {
   X,
   Zap,
 } from 'lucide-react';
-import { useAppContext } from '../context/AppContext';
+import { useAppContext, type WorkbenchSession } from '../context/AppContext';
 import { useBees, useCreateRun, useDetectProviderModels, useHives, useProviders } from '../hooks/useApi';
 import type { TraceStreamEvent } from '../types';
 import { cn, copyText, isMac } from '../utils/helpers';
@@ -37,21 +37,31 @@ export function Workbench() {
     setWorkbenchSelection,
     workbenchModels,
     setWorkbenchModel,
+    workbenchSessions,
+    updateWorkbenchSession,
+    appendWorkbenchEvent,
+    newWorkbenchSession,
   } = useAppContext();
+
+  /* The last Workbench state is held per scope in the app context, so leaving the
+   * view and coming back shows the same run instead of restarting it. The prompt
+   * and the live feed are part of that state; "New session" clears them. */
+  const session = workbenchSessions[scope];
+  const setSession = (patch: Partial<WorkbenchSession>) => updateWorkbenchSession(scope, patch);
 
   const [approvalMode, setApprovalMode] = useState<'interactive' | 'auto' | 'strict' | 'pause'>('interactive');
   const [thinking, setThinking] = useState<'auto' | 'off' | 'low' | 'medium' | 'high'>('auto');
-  const [prompt, setPrompt] = useState('');
   const [attachments, setAttachments] = useState<AttachedFile[]>([]);
   const [continueThreadId, setContinueThreadId] = useState<string | null>(
     () => searchParams.get('thread'),
   );
 
-  const [isRunning, setIsRunning] = useState(false);
-  const [activeThreadId, setActiveThreadId] = useState<string | null>(null);
-  const [events, setEvents] = useState<TraceStreamEvent[]>([]);
-  const [finalOutput, setFinalOutput] = useState<string>('');
-  const [runError, setRunError] = useState<string | null>(null);
+  const prompt = session.prompt;
+  const activeThreadId = session.threadId;
+  const events = session.events;
+  const finalOutput = session.output;
+  const runError = session.error;
+  const isRunning = session.running;
   const [copiedThread, setCopiedThread] = useState(false);
 
   const esRef = useRef<EventSource | null>(null);
@@ -127,6 +137,65 @@ export function Workbench() {
     };
   }, []);
 
+  const attachStream = (threadId: string, replaceEvents: boolean) => {
+    esRef.current?.close();
+    if (replaceEvents) updateWorkbenchSession(scope, { events: [] });
+
+    const es = new EventSource(`/api/v1/runs/${encodeURIComponent(threadId)}/stream`);
+    esRef.current = es;
+
+    es.onmessage = (msg) => {
+      try {
+        const ev = JSON.parse(msg.data) as TraceStreamEvent;
+        appendWorkbenchEvent(scope, ev);
+
+        if (ev.event_type === 'SUPERVISOR_SYNTHESIS' || ev.event_type === 'BEE_REPLY') {
+          const preview = String(ev.payload?.content_preview ?? '');
+          if (preview) {
+            latestReplyRef.current = preview;
+            updateWorkbenchSession(scope, { output: preview });
+          }
+        } else if (ev.event_type === 'HIVE_COMPLETE') {
+          if (!latestReplyRef.current) updateWorkbenchSession(scope, { output: 'Completed.' });
+          updateWorkbenchSession(scope, { running: false });
+          es.close();
+          esRef.current = null;
+        } else if (ev.event_type === 'HIVE_ERROR') {
+          const errMsg = String(
+            ev.payload?.error ?? ev.payload?.error_preview ?? 'Execution failed',
+          );
+          updateWorkbenchSession(scope, { error: errMsg, running: false });
+          es.close();
+          esRef.current = null;
+        }
+      } catch {
+        // ignore malformed SSE chunks
+      }
+    };
+
+    es.onerror = () => {
+      updateWorkbenchSession(scope, { running: false });
+      es.close();
+      esRef.current = null;
+    };
+
+    return es;
+  };
+
+  /* Rejoin the run that was in flight when the Workbench was left: the stream
+   * replays the stored events for the thread, so the feed is rebuilt instead of
+   * being lost, and a session that is still running keeps streaming. */
+  useEffect(() => {
+    if (!isRunning || !activeThreadId) return;
+    latestReplyRef.current = finalOutput;
+    const es = attachStream(activeThreadId, true);
+    return () => {
+      es.close();
+      if (esRef.current === es) esRef.current = null;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [scope, isRunning, activeThreadId]);
+
   const handleFiles = (files: FileList | null) => {
     if (!files) return;
     Array.from(files).forEach((file) => {
@@ -142,7 +211,13 @@ export function Workbench() {
   const stopStream = () => {
     esRef.current?.close();
     esRef.current = null;
-    setIsRunning(false);
+    setSession({ running: false });
+  };
+
+  const startNewSession = () => {
+    stopStream();
+    latestReplyRef.current = '';
+    newWorkbenchSession(scope);
   };
 
   const handleSubmit = async (e?: React.FormEvent) => {
@@ -150,13 +225,6 @@ export function Workbench() {
     if (readOnly || isRunning) return;
     if (!prompt.trim() && attachments.length === 0) return;
     if (scope !== 'assistant' && !entityName) return;
-
-    esRef.current?.close();
-    setIsRunning(true);
-    setEvents([]);
-    setFinalOutput('');
-    setRunError(null);
-    latestReplyRef.current = '';
 
     let fullPrompt = prompt.trim();
     if (attachments.length > 0) {
@@ -179,50 +247,12 @@ export function Workbench() {
         model: scope === 'assistant' ? assistantModel || undefined : undefined,
       });
 
-      setActiveThreadId(res.thread_id);
-      const es = new EventSource(`/api/v1/runs/${encodeURIComponent(res.thread_id)}/stream`);
-      esRef.current = es;
-
-      es.onmessage = (msg) => {
-        try {
-          const ev = JSON.parse(msg.data) as TraceStreamEvent;
-          setEvents((prev) => [...prev, ev]);
-
-          if (ev.event_type === 'SUPERVISOR_SYNTHESIS' || ev.event_type === 'BEE_REPLY') {
-            const preview = String(ev.payload?.content_preview ?? '');
-            if (preview) {
-              latestReplyRef.current = preview;
-              setFinalOutput(preview);
-            }
-          } else if (ev.event_type === 'HIVE_COMPLETE') {
-            if (!latestReplyRef.current) {
-              setFinalOutput('Completed.');
-            }
-            setIsRunning(false);
-            es.close();
-            esRef.current = null;
-          } else if (ev.event_type === 'HIVE_ERROR') {
-            const errMsg = String(
-              ev.payload?.error ?? ev.payload?.error_preview ?? 'Execution failed',
-            );
-            setRunError(errMsg);
-            setIsRunning(false);
-            es.close();
-            esRef.current = null;
-          }
-        } catch {
-          // ignore malformed SSE chunks
-        }
-      };
-
-      es.onerror = () => {
-        setIsRunning(false);
-        es.close();
-        esRef.current = null;
-      };
+      // The run state lives in the session; the reconnect effect attaches the
+      // stream once it changes, so returning to the view rejoins the same run.
+      latestReplyRef.current = '';
+      setSession({ threadId: res.thread_id, running: true, events: [], output: '', error: null });
     } catch (err) {
-      setRunError(err instanceof Error ? err.message : 'Failed to start run');
-      setIsRunning(false);
+      setSession({ error: err instanceof Error ? err.message : 'Failed to start run', running: false });
     }
   };
 
@@ -407,7 +437,7 @@ export function Workbench() {
         <div className="p-4">
           <textarea
             value={prompt}
-            onChange={(e) => setPrompt(e.target.value)}
+            onChange={(e) => setSession({ prompt: e.target.value })}
             onKeyDown={(e) => {
               if ((e.metaKey || e.ctrlKey) && e.key === 'Enter' && canRun) {
                 e.preventDefault();
@@ -547,16 +577,26 @@ export function Workbench() {
               )}
             </div>
 
-            {activeThreadId && (
+            <div className="flex items-center gap-3">
               <button
                 type="button"
-                onClick={() => navigate(`/traces/${encodeURIComponent(activeThreadId)}`)}
-                className="inline-flex items-center gap-1 text-xs font-medium text-amber-700 hover:text-amber-800"
+                onClick={startNewSession}
+                className="inline-flex items-center gap-1 rounded-lg border border-zinc-200 bg-white px-2.5 py-1 text-xs font-medium text-zinc-600 hover:bg-zinc-50 hover:text-zinc-900 transition-colors"
+                title="Clear this session and start a new thread"
               >
-                Inspect Trace
-                <ArrowRight className="h-3.5 w-3.5" />
+                New session
               </button>
-            )}
+              {activeThreadId && (
+                <button
+                  type="button"
+                  onClick={() => navigate(`/traces/${encodeURIComponent(activeThreadId)}`)}
+                  className="inline-flex items-center gap-1 text-xs font-medium text-amber-700 hover:text-amber-800"
+                >
+                  Inspect Trace
+                  <ArrowRight className="h-3.5 w-3.5" />
+                </button>
+              )}
+            </div>
           </div>
 
           {runError && (
@@ -587,9 +627,9 @@ export function Workbench() {
             </div>
           )}
 
-          {/* Output Body */}
+          {/* Output Body — scrollable so a long answer does not push the feed away */}
           {finalOutput && (
-            <div className="p-5">
+            <div className="max-h-[60vh] overflow-y-auto p-5">
               <pre className="whitespace-pre-wrap font-sans text-sm leading-relaxed text-zinc-800">
                 {finalOutput}
               </pre>

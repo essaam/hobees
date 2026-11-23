@@ -5,8 +5,12 @@ the user-visible behaviours in place:
 
 * the Workbench provider/model/target pickers survive navigation between views,
 * the assistant chat sends the selected model,
+* the last Workbench run (thread, activity feed, reply, prompt) survives a view
+  change and can be cleared with a New session button,
+* the Workbench output box scrolls,
 * the Command Palette handles arrow keys from any focus position and no longer
-  advertises that legend in its footer.
+  advertises that legend in its footer,
+* the Studio view is labelled Studio.
 """
 
 from __future__ import annotations
@@ -57,6 +61,35 @@ def test_command_palette_handles_arrow_keys_from_any_focus():
     assert "scrollIntoView" in palette
     # The footer must not advertise arrow-key navigation the user cannot rely on.
     assert "↑↓" not in palette
+
+
+def test_workbench_session_state_is_kept_in_the_app_context():
+    context = read("context/AppContext.tsx")
+    assert "WorkbenchSession" in context
+    assert "workbenchSessions" in context
+    assert "newWorkbenchSession" in context
+    assert "MAX_SESSION_EVENTS" in context
+
+    workbench = read("pages/Workbench.tsx")
+    assert "workbenchSessions[scope]" in workbench
+    assert "setSession" in workbench
+    # The view is restored, not restarted: a run that was still going is rejoined.
+    assert "if (!isRunning || !activeThreadId) return;" in workbench
+    assert "/stream" in workbench
+    # And the user can clear it deliberately.
+    assert "startNewSession" in workbench
+    assert "New session" in workbench
+    assert "setEvents" not in workbench
+    assert "setFinalOutput" not in workbench
+
+
+def test_workbench_output_and_activity_panels_scroll():
+    workbench = read("pages/Workbench.tsx")
+    output_box = workbench.split("{/* Output Body")[1]
+    assert "overflow-y-auto" in output_box
+    assert "max-h-" in output_box
+    # The activity feed keeps its own scroll area.
+    assert "max-h-56 overflow-y-auto" in workbench
 
 
 def test_the_studio_view_is_labelled_studio():

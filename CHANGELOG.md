@@ -27,6 +27,13 @@ to a heading matching that version and add the release date.
   preview a Bee is shown now names the directory it can actually read back, and
   tool path resolution returns `ERROR:` for a path that cannot exist on the
   platform instead of raising `OSError` (`[WinError 123]`) during a run.
+- Web UI: the last Workbench state is kept per scope in the app context (thread,
+  activity feed, reply, prompt), so returning to the view shows the same run
+  instead of restarting it; a run that was still going is rejoined on return, and
+  a **New session** button clears the session and starts a fresh thread.
+- Web UI: the Workbench output/response box now has its own vertical scrollbar
+  (`max-h-[60vh] overflow-y-auto`) instead of growing the page, matching the live
+  activity feed above it.
 - Web UI: the Studio view is now labelled **Studio** (previously "Hive Studio") in
   the navigation, the page heading, the Workbench links to it and the API messages
   that point users there; `specs/webapp.md`, the FastAPI description and the
