@@ -1932,27 +1932,28 @@ def _dispatch_command(
             import concurrent.futures
 
             def run_async_in_thread():
-                # Keep chat off this thread's loop so prompt_toolkit can drive
-                # the terminal while the model streams.
-                loop = asyncio.new_event_loop()
-                asyncio.set_event_loop(loop)
-                try:
-                    active_hive = shell_state.get("active_hive")
-                    if active_hive:
-                        return loop.run_until_complete(
-                            _chat_with_hive(
-                                active_hive,
-                                current_provider,
-                                db_url,
-                                shell_state,
-                                initial_input=user_input,
-                            )
+                # Keep chat on a worker-thread loop so prompt_toolkit can continue
+                # driving the terminal while the model streams. asyncio.run owns
+                # the loop lifecycle and cancels/drains remaining async tasks.
+                active_hive = shell_state.get("active_hive")
+                if active_hive:
+                    return asyncio.run(
+                        _chat_with_hive(
+                            active_hive,
+                            current_provider,
+                            db_url,
+                            shell_state,
+                            initial_input=user_input,
                         )
-                    return loop.run_until_complete(
-                        _chat_with_assistant(user_input, current_provider, db_url, shell_state)
                     )
-                finally:
-                    loop.close()
+                return asyncio.run(
+                    _chat_with_assistant(
+                        user_input,
+                        current_provider,
+                        db_url,
+                        shell_state,
+                    )
+                )
 
             with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
                 executor.submit(run_async_in_thread).result()
