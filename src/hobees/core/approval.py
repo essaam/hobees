@@ -17,6 +17,10 @@ from langgraph.types import interrupt
 ApprovalMode = Literal["interactive", "auto", "strict", "pause"]
 ApprovalAction = Literal["approve", "edit", "reject"]
 
+#: The levels a session or global setting may be set to. Kept here so the core
+#: resolver and every front-end share one definition.
+APPROVAL_MODES: tuple[str, ...] = ("interactive", "auto", "strict", "pause")
+
 
 def resolve_container_name(cli_container: str | None = None) -> str:
     return (
@@ -47,13 +51,25 @@ def resolve_thread_id(
 def resolve_approval_mode(
     cli_mode: ApprovalMode | None = None,
     *,
+    session_mode: ApprovalMode | None = None,
     interactive: bool | None = None,
 ) -> ApprovalMode:
-    if cli_mode:
-        return cli_mode
+    """Resolve the effective level.
+
+    Precedence (specs/HITL.md §2.3): CLI flag → session override → environment /
+    saved global setting → context default. Unknown values are ignored rather
+    than trusted, so a bad setting can never widen a policy.
+    """
+    for candidate in (cli_mode, session_mode):
+        if candidate in APPROVAL_MODES:
+            return candidate  # type: ignore[return-value]
     env_mode = os.getenv("HOBEES_APPROVAL_MODE")
-    if env_mode in {"interactive", "auto", "strict", "pause"}:
+    if env_mode in APPROVAL_MODES:
         return env_mode  # type: ignore[return-value]
+    from hobees.config import settings
+
+    if settings.approval_mode in APPROVAL_MODES:
+        return settings.approval_mode  # type: ignore[return-value]
     if interactive is None:
         interactive = sys.stdin.isatty()
     return "interactive" if interactive else "strict"

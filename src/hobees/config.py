@@ -77,11 +77,45 @@ class Settings(BaseSettings):
         default="summary",
         description="Trace message content level: metadata, redacted summaries, or full redacted messages",
     )
+    approval_mode: Literal["interactive", "auto", "strict", "pause"] | None = Field(
+        default=None,
+        description="Default tool approval mode for CLI and interactive sessions",
+    )
     config_path: Path | None = Field(default=None, description="Path to declarative config YAML/JSON to auto-import")
     artifacts_root: Path = Field(default_factory=lambda: Path("./artifacts"), description="Default root directory for per-hive artifacts")
 
 
 settings = Settings()
+
+
+def set_global_approval_mode(
+    mode: Literal["interactive", "auto", "strict", "pause"] | None,
+) -> None:
+    """Persist the global approval mode in the user's hobees environment file."""
+    env_path = _CONFIG_DIR / ".env"
+    env_path.parent.mkdir(parents=True, exist_ok=True)
+    lines = env_path.read_text(encoding="utf-8").splitlines() if env_path.exists() else []
+    setting = "HOBEES_APPROVAL_MODE"
+    updated = False
+    result: list[str] = []
+    for line in lines:
+        if line.partition("=")[0].strip() == setting:
+            if mode is not None:
+                result.append(f"{setting}={mode}")
+            updated = True
+        else:
+            result.append(line)
+    if mode is not None and not updated:
+        result.append(f"{setting}={mode}")
+    env_path.write_text(
+        "\n".join(result) + ("\n" if result else ""),
+        encoding="utf-8",
+    )
+    if mode is None:
+        os.environ.pop(setting, None)
+    else:
+        os.environ[setting] = mode
+    settings.approval_mode = mode
 
 
 def ensure_database_url() -> bool:
@@ -109,4 +143,10 @@ def ensure_database_url() -> bool:
     return True
 
 
-__all__ = ["Settings", "ensure_database_url", "get_default_database_path", "settings"]
+__all__ = [
+    "Settings",
+    "ensure_database_url",
+    "get_default_database_path",
+    "set_global_approval_mode",
+    "settings",
+]

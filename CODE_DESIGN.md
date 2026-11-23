@@ -755,7 +755,7 @@ def truncate_tool_output(output, call_id, thread_id):
 4. **Context Efficiency** - Projection, truncation, compaction, progressive loading to control token growth
 5. **Bi-Directional Sync** - Skills synced between the configured database and Markdown files
 6. **Completed-Run Skill Drafts** - Eligible completed Hive runs are analyzed and drafts remain subject to user approval
-7. **Session Override Pattern** - Thinking level: session → Bee/Hive config → default
+7. **Session Override Pattern** - Thinking level and tool approval level: session → saved global setting (`HOBEES_APPROVAL_MODE`) → context default (`interactive` on a TTY, `strict` headless)
 8. **Shared Handlers** - CLI and shell slash commands use identical handler functions
 
 ---

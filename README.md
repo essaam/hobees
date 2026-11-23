@@ -6,16 +6,17 @@
 
 **Declarative (config-driven), CLI-first multi-agent orchestration built on LangGraph.**
 
-*Hobees makes Bee and Hive workflows usable as repeatable command-line jobs, including in short-lived containers, while keeping an interactive shell and TUI available.* The name is inspired by honey bees. PostgreSQL is recommended for multi-process use, while SQLite is supported for local use.
+_Hobees makes Bee and Hive workflows usable as repeatable command-line jobs, including in short-lived containers, while keeping an interactive shell and TUI available._ The name is inspired by honey bees. PostgreSQL is recommended for multi-process use, while SQLite is supported for local use.
 
 ## Why `hobees`?
 
 Most multi-agent frameworks force you to write glue code to wire agents together, and then break down when you try to move from a local prototype to a reproducible pipeline. `hobees` treats agent teams as **portable, repeatable configuration**:
 
-* **Interactive TUI + Headless CLI:** Prototype prompts and watch live delegation in the terminal, then run the exact same Hive non-interactively in GitHub Actions, cron jobs, or Docker workers.
-* **Mix Local & Cloud Models per Agent:** Assign a high-reasoning frontier model (`thinking: high`) to your Supervisor while routing repetitive tasks to fast local models (`Ollama`, `llama.cpp`) or lightweight APIs.
-* **Resumable Execution & Scoped Memory:** Backed by SQLite or PostgreSQL checkpoints (`--thread`), isolated workspace directories, and scoped memory (`global`, `hive`, or `bee` namespaces).
-* **Self-Improving Workflows:** Capture successful multi-agent runs into reusable Markdown skills (`/skill save-last`) that future Hives automatically load.
+- **Interactive TUI + Headless CLI:** Prototype prompts and watch live delegation in the terminal, then run the exact same Hive non-interactively in GitHub Actions, cron jobs, or Docker workers.
+- **Mix Local & Cloud Models per Agent:** Assign a high-reasoning frontier model (`thinking: high`) to your Supervisor while routing repetitive tasks to fast local models (`Ollama`, `llama.cpp`) or lightweight APIs.
+- **Resumable Execution & Scoped Memory:** Backed by SQLite or PostgreSQL checkpoints (`--thread`), isolated workspace directories, and scoped memory (`global`, `hive`, or `bee` namespaces).
+- **Self-Improving Workflows:** Capture successful multi-agent runs into reusable Markdown skills (`/skill save-last`) that future Hives automatically load.
+- **Approval Gates & Container-Safe Threads:** Per-Bee `require_approval` tool lists enforced by a runtime policy (`interactive` \| `auto` \| `strict` \| `pause`), with every decision audited and every run keyed by a collision-free `<container>:<scope>:<entity>:<thread>` id for cross-container trace inspection and checkpoint replay.
 
 ## 🍯 Quick Start
 
@@ -93,8 +94,10 @@ hobees run --hive dev-team --json "Add feature x to y"
 
 - [Architecture Overview](#architecture-overview)
 - [Core Concepts](#core-concepts)
+- [Approval Gates (HITL)](#-approval-gates-hitl)
 - [Interactive Shell](#interactive-shell)
 - [CLI Commands](#cli-commands)
+- [Container-Aware Thread IDs & Trace Inspection](#-container-aware-thread-ids--trace-inspection)
 - [Configuration](#configuration)
 - [Docker Compose](#docker-compose)
 - [Multi-Terminal & Web API](#multi-terminal--web-api)
@@ -108,60 +111,68 @@ hobees run --hive dev-team --json "Add feature x to y"
 ## Architecture Overview
 
 ```
-┌────────────────────────────────────────────────────────────────┐
-│                      hobees CLI                                │
-├────────────────────────────────────────────────────────────────┤
-│  Interactive Shell (/slash commands)    │   Typer Subcommands  │
-├─────────────────────────────────────────┼──────────────────────┤
-│  Queen Agent Component                  │                      │
-│  ─────────────────────────────────      │                      │
-│  • inspect_roster()                     │                      │
-│  • form_and_run_hive(goal, bees)        │                      │
-├─────────────────────────────────────────┼──────────────────────┤
-│  Working Hive (Supervisor + Workers)    │                      │
-│  ─────────────────────────────────      │                      │
-│  • Hive Supervisor (create_agent)       │                      │
-│  • Worker Bees (create_agent)           │                      │
-│  • PostgreSQL / SQLite checkpoints      │                      │
-├─────────────────────────────────────────┼──────────────────────┤
-│  Core Services                          │                      │
-│  ┌──────────────┐ ┌──────────────────┐  │                      │
-│  │ LLM Factory  │ │ Tool Registry    │  │                      │
-│  │ (providers)  │ │ (read_file, etc) │  │                      │
-│  └──────────────┘ └──────────────────┘  │                      │
-│  ┌──────────────┐ ┌──────────────────┐  │                      │
-│  │ Telemetry    │ │ Context Manager  │  │                      │
-│  │ (callbacks)  │ │ (compaction)     │  │                      │
-│  └──────────────┘ └──────────────────┘  │                      │
-│  ┌──────────────┐ ┌──────────────────┐  │                      │
-│  │ Memory Mgr   │ │ Skill Harvester  │  │                      │
-│  │ (scoped)     │ │ (self-learn)     │  │                      │
-│  └──────────────┘ └──────────────────┘  │                      │
-├─────────────────────────────────────────┼──────────────────────┤
-│  PostgreSQL / SQLite Database           │                      │
-│  ┌──────────────┐ ┌──────────────────┐  │                      │
-│  │ Providers    │ │ Bees             │  │                      │
-│  │ Bees/Hives   │ │ Memories/Skills  │  │                      │
-│  │ Runs/Usage   │ │ Checkpoints      │  │                      │
-│  └──────────────┘ └──────────────────┘  │                      │
-└─────────────────────────────────────────┴──────────────────────┘
+┌─────────────────────────────────────────┐
+│               hobees CLI                │
+├─────────────────────────────────────────┤
+│  Interactive Shell (/slash commands)    │
+├─────────────────────────────────────────┤
+│  Queen Agent Component                  │
+│  ─────────────────────────────────      │
+│  • inspect_roster()                     │
+│  • form_and_run_hive(goal, bees)        │
+├─────────────────────────────────────────┤
+│  Working Hive (Supervisor + Workers)    │
+│  ─────────────────────────────────      │
+│  • Hive Supervisor (create_agent)       │
+│  • Worker Bees (create_agent)           │
+│  • Approval gate (tool middleware)      │
+│  • PostgreSQL / SQLite checkpoints      │
+├─────────────────────────────────────────┤
+│  Core Services                          │
+│  ┌──────────────┐ ┌──────────────────┐  │
+│  │ LLM Factory  │ │ Tool Registry    │  │
+│  │ (providers)  │ │ (read_file, etc) │  │
+│  └──────────────┘ └──────────────────┘  │
+│  ┌──────────────┐ ┌──────────────────┐  │
+│  │ Telemetry    │ │ Context Manager  │  │
+│  │ (callbacks)  │ │ (compaction)     │  │
+│  └──────────────┘ └──────────────────┘  │
+│  ┌──────────────┐ ┌──────────────────┐  │
+│  │ Memory Mgr   │ │ Skill Harvester  │  │
+│  │ (scoped)     │ │ (self-learn)     │  │
+│  └──────────────┘ └──────────────────┘  │
+│  ┌──────────────┐ ┌──────────────────┐  │
+│  │ HITL gates   │ │ Approval events  │  │
+│  │ (approval)   │ │ (audit store)    │  │
+│  └──────────────┘ └──────────────────┘  │
+├─────────────────────────────────────────┤
+│  PostgreSQL / SQLite Database           │
+│  ┌──────────────┐ ┌──────────────────┐  │
+│  │ Providers    │ │ Bees             │  │
+│  │ Bees/Hives   │ │ Memories/Skills  │  │
+│  │ Runs/Usage   │ │ Checkpoints      │  │
+│  │              │ │ Approval events  │  │
+│  └──────────────┘ └──────────────────┘  │
+└─────────────────────────────────────────┘
 ```
 
 ### Two Orchestration Layers
 
-| Layer | Role | Component |
-|-------|------|-----------|
-| **Meta-Orchestration** | Queen agent inspects the roster and can create a dynamic hive; the current `/goal` handler creates one directly | **Queen Meta-Orchestrator** (separate agent, not a bee) |
-| **Hive Orchestration** | Delegates subtasks to worker bees within a specific hive | **Hive Supervisor** (configured per-hive, separate from bees) |
+| Layer                  | Role                                                                                                            | Component                                                     |
+| ---------------------- | --------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------- |
+| **Meta-Orchestration** | Queen agent inspects the roster and can create a dynamic hive; the current `/goal` handler creates one directly | **Queen Meta-Orchestrator** (separate agent, not a bee)       |
+| **Hive Orchestration** | Delegates subtasks to worker bees within a specific hive                                                        | **Hive Supervisor** (configured per-hive, separate from bees) |
 
-> **Note:** The **Queen** and **Hive Supervisor** are *orchestration agents*, not worker bees. They route work and synthesize results. A hive's supervisor is configured with its own provider/model/prompt, independent of its member bees.
+> **Note:** The **Queen** and **Hive Supervisor** are _orchestration agents_, not worker bees. They route work and synthesize results. A hive's supervisor is configured with its own provider/model/prompt, independent of its member bees.
 
 ---
 
 ## Core Concepts
 
 ### 🔌 LLM Providers
+
 Global registry of LLM endpoints shared across all Bees and Hives.
+
 - **Types**: `openai`, `anthropic`, `google_genai`, `openai_compatible` (Ollama, vLLM, LM Studio, OpenRouter, Groq, etc.)
 - **Security**: Stores only the environment variable name for API keys (`api_key_env`), never plaintext secrets
 - **Cost tracking**: Optional `input_cost_per_1m` / `output_cost_per_1m` for real-time cost estimation
@@ -173,8 +184,10 @@ hobees provider add --interactive
 ```
 
 ### 🐝 Worker Bees
+
 Reusable AI agents that exist independently of Hives. A Bee can belong to multiple Hives simultaneously.
-- **Attributes**: name, role_description, system_prompt, provider, model, temperature, thinking_level, tool_names
+
+- **Attributes**: name, role_description, system_prompt, provider, model, temperature, thinking_level, tool_names, `require_approval` (tools that must pass an [approval gate](#-approval-gates-hitl))
 - **Thinking levels**: `off` | `low` | `medium` | `high` (provider-normalized)
 
 ```bash
@@ -182,7 +195,9 @@ Reusable AI agents that exist independently of Hives. A Bee can belong to multip
 ```
 
 ### ⬡ Working Hives
+
 Teams of Bees under a **Hive Supervisor** (many-to-many relationship via `hive_memberships`).
+
 - **Supervisor**: Has its own provider, model, prompt, and thinking level (configured at hive creation)
 - **Static Hives** (`is_dynamic=false`): User-created, reusable teams
 - **Dynamic Hives** (`is_dynamic=true`): Created for one-off goals; the `/goal` handler creates a new one for each run
@@ -195,42 +210,134 @@ Teams of Bees under a **Hive Supervisor** (many-to-many relationship via `hive_m
 ```
 
 ### 👑 Queen Meta-Orchestrator Component
+
 The Queen agent implementation can inspect the global roster and select Bees for a goal. Its `form_and_run_hive` tool always creates a new dynamic Hive; it does not execute or reuse an existing static Hive. The interactive shell's `/goal` handler currently creates and runs a dynamic Hive directly rather than invoking the Queen agent.
+
 - **Tools**: `inspect_roster()`, `form_and_run_hive(goal, bee_names)`
 - **Session override**: `/thinking <level>` applies to all Bees in the run
 - **Not a bee** — it's a separate orchestration agent that manages hive creation
 
 ---
 
+## 🔐 Approval Gates (HITL)
+
+Tool sensitivity is declared **per Bee**; enforcement is a **runtime policy** resolved per run. A Bee lists which of its tools must pass a gate, and the runtime decides what happens when one of those tools is called.
+
+```yaml
+bees:
+  - name: coder-bee
+    provider: openai
+    model: gpt-4o
+    tools: [read_file, write_file, run_shell]
+    require_approval: [write_file, run_shell]
+```
+
+- `require_approval` is a JSON column on the `bees` table (`hobees init` adds it to existing databases) and is reconciled by `hobees import` / `hobees init --config`. Declare it in the config file — `hobees bee create` and the interactive `/bee create` do not yet collect it, so the import path is the way to set it today.
+- Every tool listed must also be in the Bee's `tools` list; `hobees import` and the shared Bee handlers warn when it is not.
+
+### Levels
+
+| Level         | What happens to a gated tool                                               | Process lifecycle                                          | Primary use                                    |
+| ------------- | -------------------------------------------------------------------------- | ---------------------------------------------------------- | ---------------------------------------------- |
+| `interactive` | `interrupt()` pauses the graph and prompts `[A]pprove / [E]dit / [R]eject` | stays alive waiting for the operator                       | local shell/TUI, `hobees hive run` on a TTY    |
+| `auto`        | executes immediately, recorded as an auto-approval                         | runs start-to-finish without blocking                      | trusted containers, cron, CI/CD                |
+| `strict`      | never executes; returns a policy-rejection `ToolMessage`                   | runs start-to-finish without blocking                      | read-only audit containers, untrusted Hives    |
+| `pause`       | `interrupt()` + checkpoint, prints the JSON manifest, exits `0`            | container ends immediately; a later run resumes the thread | asynchronous sign-off for ephemeral containers |
+
+### Precedence
+
+The effective level is resolved in strict order (first match wins):
+
+1. **CLI flag** — `--approval-mode <level>` (convenience alias `--auto-approve` → `auto`) on the root, `shell`, `run` and `prompt` commands. The flag seeds the session level for that run; a later `/approvals <level>` replaces it.
+2. **Session override** — `/approvals <level>` in the shell or TUI, or `hobees approvals --session <level>` headless. Lives only for the current process.
+3. **Saved global setting** — `HOBEES_APPROVAL_MODE` in `~/.hobees/.env`, written by `hobees approvals set <level>`.
+4. **Context default** — `interactive` when stdin is a TTY, `strict` when headless (secure by default).
+
+Values outside these four levels are ignored rather than trusted, so a bad setting can never widen a policy.
+
+### Where the gate runs
+
+`ApprovalMiddleware` wraps tool execution **inside the LangGraph graph** (on each worker's `create_agent`), not in an external loop around `.invoke()`. That keeps:
+
+- the exact `interrupt()` / `Command(resume=...)` boundaries in the checkpointer, so `--replay <checkpoint_id>` works across gates;
+- paired messages for every `AIMessage(tool_calls=[...])` — a rejection still returns a `ToolMessage`, so the Bee can recover rather than crash, and message-history validation stays valid;
+- sequential evaluation when a Bee emits several gated tool calls in one turn.
+
+Editing at a gate substitutes the approved arguments before execution and records the decision as `edit` with the original and final args; rejections record a reason. Every evaluation is written to `approval_events`, and a telemetry-store failure never weakens the gate.
+
+### Setting the level
+
+```text
+🍯 hobees > /approvals                 # current level + where it comes from, plus the level legend
+🍯 hobees > /approvals auto            # this session only
+🍯 hobees > /approvals global strict   # persisted to ~/.hobees/.env
+🍯 hobees > /approvals default         # clear the session override
+```
+
+`/permissions` is the alias of `/approvals` in both front-ends, and the completion menu and the handler accept exactly the same words. Headless the same resolver is exposed as `hobees approvals` (alias `hobees permissions`), with `--json` for scripted callers:
+
+```bash
+hobees approvals                       # show the effective level and its source
+hobees approvals set auto              # persist globally
+hobees approvals --session pause       # this run only, nothing saved
+hobees approvals --json                # {"level": "...", "source": "...", "global": "...", "session": ...}
+hobees approvals --help                # levels, usage and precedence explained
+```
+
+In `--json`, `level` is the effective level, `global` the persisted value, `session` the override for this run, and `source` the tier that won (`session override` / `global` / `context default`). Both the env var and the `.env` file report as `global`, and the CLI-flag tier is not reported separately.
+
+The interactive prompt loop currently runs in `hobees hive run` (headless on a TTY); in shell/TUI chat turns `auto` and `strict` are enforced immediately, while an `interactive`/`pause` gate there is resumed with `hobees hive run --resume-decision`.
+
+### Pause, exit, resume
+
+```bash
+# Container 1: a gated tool pauses the graph, the manifest is printed, exit 0
+docker compose run --rm hobees hive run dev-team "Review src/" --thread pr-42 \
+  --approval-mode pause --json
+# → {"status": "awaiting_approval", "container": "coder-worker-1",
+#    "thread": "coder-worker-1:hive:dev-team:pr-42", "pending_approvals": [...]}
+
+# Container 2: same container name and thread, decision supplied from the operator
+HOBEES_CONTAINER_NAME=coder-worker-1 hobees hive run dev-team "continue" --thread pr-42 \
+  --resume-decision approve \
+  --resume-args '{"command": "pytest tests/auth -k test_login"}' \
+  --json
+```
+
+`--resume-decision` accepts `approve`, `edit` or `reject`, with `--resume-args` (JSON) for edits and `--resume-reason` for rejections, and the run status stays `awaiting_approval` while a gate is pending.
+
+---
+
 ## Interactive Shell
 
-Running `hobees` with no arguments drops you into the interactive shell with slash-command autocomplete. Run `hobees --tui` to use the alternate TUI. In either interface, type `@` followed by a path prefix to browse the current folder. Use Up/Down to select a suggestion and Enter to insert its path; folders can be browsed by adding `/` to the path. The picker includes `..` for the parent directory and displays at most four rows. The selected path is added to your message as text; Hobees does not automatically read or attach the file contents.
+Running `hobees` with no arguments drops you into the interactive shell with slash-command autocomplete. Run `hobees --tui` to use the alternate TUI. In either interface, type `@` followed by a path prefix to browse the current folder. Use Up/Down to select a suggestion and Enter to insert its path; folders can be browsed by adding `/` to the path. The picker includes `..` for the parent directory and displays at most four rows. The selected path is added to your message as text; Hobees does not automatically read or attach the file contents. The welcome panel also reports the effective approval level and the tier it came from, so you can see before the first gated tool call whether a tool will prompt, run without asking, be rejected, or pause the run.
 
 ### Prompt States
 
-| Prompt | Meaning |
-|--------|---------|
-| `🍯 hobees > ` | Default assistant chat and slash-command mode |
-| `🍯 (hobees:dev-team) > ` | Locked to Hive "dev-team" |
+| Prompt                    | Meaning                                       |
+| ------------------------- | --------------------------------------------- |
+| `🍯 hobees > `            | Default assistant chat and slash-command mode |
+| `🍯 (hobees:dev-team) > ` | Locked to Hive "dev-team"                     |
 
 ### Slash Commands
 
-| Command | Description |
-|---------|-------------|
-| `/provider add \| list \| test \| remove \| models <alias> [--refresh] \| use <alias\|number>` | Manage LLM providers. `models` only **lists** the models a provider exposes; `use` **switches** the session to that provider |
-| `/assistant show \| use <provider> [model] \| model [name]` | Configure the default assistant (the agent you chat with). The choice is saved and reused on every launch, so you are not asked again |
-| `/bee create \| list \| update \| delete \| thinking <name> <level>` | Manage Worker Bees |
-| `/hive create \| add-bee \| remove-bee \| list \| remove \| use <name> \| auto \| thinking <name> <level> \| artifacts [name] \| trace [name]` | Manage Working Hives. `/hive remove` lets you select multiple hives by list number |
-| `/chat bee <name> \| hive <name> \| list` | Direct chat with Bee or Hive |
-| `/goal <goal>` | Run a goal by creating a dynamic Hive; does not reuse a static Hive |
-| `/usage [all\|bee\|hive\|provider\|day] [--window 1h\|24h\|7d\|all]` | Query usage telemetry |
-| `/thinking <off\|low\|medium\|high\|auto>` | Session-wide thinking level override |
-| `/compact` | Compress active thread's message history |
-| `/memory list\|add\|forget\|show [--namespace global\|hive:<name>\|bee:<name>]` | Cross-session scoped memory |
-| `/skill list\|show\|create\|save-last\|assign\|unassign\|sync` | Progressive skill library |
-| `/session save\|load\|list\|delete <name>` | Named session management |
-| `/help` | Show all commands |
-| `/quit` or `/exit` | Exit shell |
+| Command                                                                                                                                        | Description                                                                                                                                                                                                                                                                                                                                        |
+| ---------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `/provider add \| list \| test \| remove \| models <alias> [--refresh] \| use <alias\|number>`                                                 | Manage LLM providers. `models` only **lists** the models a provider exposes; `use` **switches** the session to that provider                                                                                                                                                                                                                       |
+| `/assistant show \| use <provider> [model] \| model [name]`                                                                                    | Configure the default assistant (the agent you chat with). The choice is saved and reused on every launch, so you are not asked again                                                                                                                                                                                                              |
+| `/bee create \| list \| update \| delete \| thinking <name> <level>`                                                                           | Manage Worker Bees                                                                                                                                                                                                                                                                                                                                 |
+| `/hive create \| add-bee \| remove-bee \| list \| remove \| use <name> \| auto \| thinking <name> <level> \| artifacts [name] \| trace [name]` | Manage Working Hives. `/hive remove` lets you select multiple hives by list number                                                                                                                                                                                                                                                                 |
+| `/chat bee <name> \| hive <name> \| list`                                                                                                      | Direct chat with Bee or Hive                                                                                                                                                                                                                                                                                                                       |
+| `/goal <goal>`                                                                                                                                 | Run a goal by creating a dynamic Hive; does not reuse a static Hive                                                                                                                                                                                                                                                                                |
+| `/usage [all\|bee\|hive\|provider\|day] [--window 1h\|24h\|7d\|all]`                                                                           | Query usage telemetry                                                                                                                                                                                                                                                                                                                              |
+| `/thinking <off\|low\|medium\|high\|auto>`                                                                                                     | Session-wide thinking level override                                                                                                                                                                                                                                                                                                               |
+| `/approvals [show\|set <level>\|global <level>\|default]` (alias `/permissions`)                                                               | Tool approval level. Plain form sets it for this session; `global <level>` persists it to `~/.hobees/.env`; `default`/`clear` removes the setting for the addressed scope. Shows the effective level, where it comes from, and the level legend. Headless equivalent: `hobees approvals --help` (levels: `interactive`, `auto`, `strict`, `pause`) |
+| `/compact`                                                                                                                                     | Compress active thread's message history                                                                                                                                                                                                                                                                                                           |
+| `/memory list\|add\|forget\|show [--namespace global\|hive:<name>\|bee:<name>]`                                                                | Cross-session scoped memory                                                                                                                                                                                                                                                                                                                        |
+| `/skill list\|show\|create\|save-last\|assign\|unassign\|sync`                                                                                 | Progressive skill library                                                                                                                                                                                                                                                                                                                          |
+| `/session save\|load\|list\|delete <name>`                                                                                                     | Named session management                                                                                                                                                                                                                                                                                                                           |
+| `/help`                                                                                                                                        | Show all commands                                                                                                                                                                                                                                                                                                                                  |
+| `/quit` or `/exit`                                                                                                                             | Exit shell                                                                                                                                                                                                                                                                                                                                         |
 
 ### Example Session
 
@@ -323,6 +430,27 @@ hobees init --config ./hobees.yaml
 HOBEES_CONFIG_PATH=./hobees.yaml hobees hive list
 hobees shell --hive research-team
 
+# Approval levels — global default, per-session, and per-run
+hobees approvals                     # show the effective level and where it comes from
+hobees approvals show                # same, explicit form
+hobees approvals set auto            # persist a global default in ~/.hobees/.env
+hobees approvals clear               # drop back to the context default
+hobees approvals --session pause     # this run only, nothing saved
+hobees permissions --json            # alias spelling, parseable for CI
+hobees approvals --help              # levels, usage and precedence explained
+hobees --approval-mode strict        # level for one interactive shell/TUI session
+hobees run --hive research-team "Audit the repo" --approval-mode pause
+hobees run --hive research-team "Audit the repo" --auto-approve
+
+# Container-aware threads, trace inspection and checkpoint replay
+hobees hive run dev-team "Review src/" --thread pr-42 --json     # JSON includes container + thread
+HOBEES_CONTAINER_NAME=worker-2 hobees hive run dev-team "Review src/" --thread pr-42 --json
+hobees trace --list --limit 20
+hobees trace --thread worker-1:hive:dev-team:pr-42
+hobees trace --thread pr-42 --container worker-1 --json
+hobees hive run dev-team "continue" --thread pr-42 --container worker-1 --resume-decision approve --json
+hobees hive run dev-team "retry from that gate" --thread pr-42 --replay 1ef8a9c2-... --patch-message "only run login tests"
+
 # Memory management
 hobees memory list --namespace global
 hobees memory add user_prefers_typescript "User prefers TypeScript over JavaScript" --namespace global
@@ -345,17 +473,69 @@ hobees stats --window 24h --group-by hive
 
 ---
 
+## 🧵 Container-Aware Thread IDs & Trace Inspection
+
+Every run is stored under a four-segment thread key, so identical configurations running in different containers against a shared database cannot collide:
+
+```text
+<container_name>:<scope>:<entity_name>:<thread_id>
+coder-worker-1:hive:dev-team:pr-42
+```
+
+| Segment          | Value                                                                                    |
+| ---------------- | ---------------------------------------------------------------------------------------- |
+| `container_name` | resolved instance identity (see below)                                                   |
+| `scope`          | `hive` \| `bee` \| `assistant`                                                           |
+| `entity_name`    | hive or bee name, or `default` for the assistant                                         |
+| `thread_id`      | your `--thread` value, or an auto-generated 8-char hex run id when `--thread` is omitted |
+
+`container_name` is resolved in order: `--container <name>` → `HOBEES_CONTAINER_NAME` → `HOSTNAME` → `socket.gethostname()` → `local` (Docker sets `HOSTNAME` to the container's 12-char id). Two containers running the same config with `HOBEES_CONTAINER_NAME=worker-1` and `worker-2` and the same `--thread pr-42` produce `worker-1:hive:dev-team:pr-42` and `worker-2:hive:dev-team:pr-42` — no collisions.
+
+- A thread that is already fully qualified is preserved verbatim, so a key copied from `--json` output or from `hobees trace` can be handed straight back as `--thread` (with `--container` to target another instance).
+- `hobees hive run --json` reports both `container` and `thread` (the resolved key), plus `pending_approvals` when a gate is still open.
+- Thread-key columns accept the full namespaced value: `runs.thread_id`, `usage_events.thread_id`, `memories.source_thread_id` and `skills.source_thread_id` are `VARCHAR(512)`; `runs` and `usage_events` also store `container_name`, and `usage_events` stores `checkpoint_id` per LLM step.
+
+### Trace inspection
+
+`hobees trace` merges the database records with the per-thread JSONL event log:
+
+```bash
+hobees trace --list [--container <name>] [--hive <name>] [--limit 20]
+hobees trace --thread <id> [--container <name>] [--hive <name>] [--json]
+```
+
+The JSON record contains `container`, `thread`, `status` (`completed`, `awaiting_approval`, `failed`, or `unknown` when no run row exists), the `events` read from the JSONL file, `approvals` (mode, decision, `wait_ms`, original vs. edited args, reason) and `usage` (model, latency, tokens, `checkpoint_id`). The human output prints each gate as `GATE <mode>: <tool> [<decision>] bee=<bee>` and then the event list.
+
+Trace events are appended under `artifacts/<hive>/traces/`, and `/hive trace [name]` in the shell or TUI prints the newest log for a hive. Because `:` cannot appear in a Windows filename, the file name escapes it (`:` → `__`) — `coder-worker-1__hive__dev-team__pr-42.jsonl` — while the full key stays inside every event, so reconstruction joins by the event's `thread_id` rather than by the file name.
+
+### Replay from a checkpoint
+
+```bash
+hobees hive run dev-team "retry from that gate" --thread pr-42 --replay <checkpoint_id>
+hobees hive run dev-team "..." --thread pr-42 --replay <checkpoint_id> --patch-message "only run login tests"
+```
+
+The checkpoint must exist in the resolved thread's state history — the run fails fast with a clear error if it does not. `--patch-message` appends a human message to that snapshot before forking forward, so only the steps after the checkpoint re-run, using the Bee prompts and models as they are configured now.
+
+### Not built yet on this branch
+
+- Structured log enrichment (per-line `container` / `thread` / `checkpoint_id` context and `--log-format json` / `HOBEES_LOG_FORMAT`) is specified in `specs/Trace.md` but not implemented; trace visibility comes from the JSONL event log and the database.
+- The TUI trace tree and its inspector pane with `[r] Replay` are not implemented — `hobees trace` prints a flat list and its `checkpoints` field is reserved (currently empty).
+- Shell/TUI chat turns honour `auto` and `strict` immediately, but the Approve/Edit/Reject prompt loop only exists in `hobees hive run`; single-Bee chat turns also record the container segment as `local` instead of the resolved name.
+
+---
+
 ## Configuration
 
 Application settings are loaded from `~/.hobees/.env` (or local `.env`) with the `HOBEES_` prefix. PostgreSQL is recommended for multi-process use; SQLite is also supported for local/single-user use.
 
 ### Database and startup configuration
 
-| Variable | Description |
-|----------|-------------|
-| `HOBEES_DATABASE_URL` | Database URL, e.g. `postgresql+psycopg://user:pass@localhost:5432/hobees` or `sqlite:///./hobees.db` |
-| `HOBEES_CONFIG_PATH` | Optional YAML/JSON config file to synchronize automatically before normal CLI commands |
-| `HOBEES_ARTIFACTS_ROOT` | Root directory for per-hive run artifacts (default: `./artifacts`) |
+| Variable                | Description                                                                                          |
+| ----------------------- | ---------------------------------------------------------------------------------------------------- |
+| `HOBEES_DATABASE_URL`   | Database URL, e.g. `postgresql+psycopg://user:pass@localhost:5432/hobees` or `sqlite:///./hobees.db` |
+| `HOBEES_CONFIG_PATH`    | Optional YAML/JSON config file to synchronize automatically before normal CLI commands               |
+| `HOBEES_ARTIFACTS_ROOT` | Root directory for per-hive run artifacts (default: `./artifacts`)                                   |
 
 ### Choosing SQLite or PostgreSQL
 
@@ -415,18 +595,20 @@ copy or migrate existing data between SQLite and PostgreSQL.
 
 ### Optional (with defaults)
 
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `HOBEES_QUEEN_PROVIDER` | `openai` | Default Queen provider alias |
-| `HOBEES_QUEEN_MODEL` | `gpt-4o-mini` | Default Queen model |
-| `HOBEES_API_HOST` | `127.0.0.1` | FastAPI bind host |
-| `HOBEES_API_PORT` | `8420` | FastAPI bind port |
-| `HOBEES_LOG_LEVEL` | `INFO` | Application log level |
-| `HOBEES_COMPACTION_THRESHOLD` | `0.65` | Fraction of context window before compaction |
-| `HOBEES_MAX_TOOL_OUTPUT_CHARS` | `8000` | Max chars for tool output before scratchpad offload |
-| `HOBEES_ENABLE_AUTO_MEMORY` | `false` | After successful Hive runs, make an extra model call to save stable preferences globally and (for named Hives) durable Hive-specific facts |
-| `HOBEES_SKILLS_DIR` | `~/.hobees/skills` | Directory for skill Markdown files |
-| `HOBEES_TRACE_CONTENT_MODE` | `summary` | Trace message content: `metadata` (no message text), `summary` (short previews with best-effort secret redaction), or `full` (full messages with best-effort secret redaction). Tool argument and result values are never logged |
+| Variable                       | Default                                     | Description                                                                                                                                                                                                                      |
+| ------------------------------ | ------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `HOBEES_QUEEN_PROVIDER`        | `openai`                                    | Default Queen provider alias                                                                                                                                                                                                     |
+| `HOBEES_QUEEN_MODEL`           | `gpt-4o-mini`                               | Default Queen model                                                                                                                                                                                                              |
+| `HOBEES_API_HOST`              | `127.0.0.1`                                 | FastAPI bind host                                                                                                                                                                                                                |
+| `HOBEES_API_PORT`              | `8420`                                      | FastAPI bind port                                                                                                                                                                                                                |
+| `HOBEES_LOG_LEVEL`             | `INFO`                                      | Application log level                                                                                                                                                                                                            |
+| `HOBEES_COMPACTION_THRESHOLD`  | `0.65`                                      | Fraction of context window before compaction                                                                                                                                                                                     |
+| `HOBEES_MAX_TOOL_OUTPUT_CHARS` | `8000`                                      | Max chars for tool output before scratchpad offload                                                                                                                                                                              |
+| `HOBEES_ENABLE_AUTO_MEMORY`    | `false`                                     | After successful Hive runs, make an extra model call to save stable preferences globally and (for named Hives) durable Hive-specific facts                                                                                       |
+| `HOBEES_SKILLS_DIR`            | `~/.hobees/skills`                          | Directory for skill Markdown files                                                                                                                                                                                               |
+| `HOBEES_TRACE_CONTENT_MODE`    | `summary`                                   | Trace message content: `metadata` (no message text), `summary` (short previews with best-effort secret redaction), or `full` (full messages with best-effort secret redaction). Tool argument and result values are never logged |
+| `HOBEES_APPROVAL_MODE`         | _(unset)_                                   | Global tool approval level (`interactive` \| `auto` \| `strict` \| `pause`), written by `hobees approvals set <level>`. When unset the context default applies: `interactive` on a TTY, `strict` in headless runs                |
+| `HOBEES_CONTAINER_NAME`        | _(unset → `HOSTNAME` → hostname → `local`)_ | Instance identity used as the first segment of every thread key. Precedence: `--container` → this variable → `HOSTNAME` → `socket.gethostname()` → `local`                                                                       |
 
 ### Example `.env`
 
@@ -486,6 +668,8 @@ docker compose run --rm hobees hive run research-team "Summarize the project pla
 
 The `./artifacts` bind mount makes run outputs available on the host (worker-created files are under `artifacts/<hive>/output/`), and `./skills` persists Markdown skill files. The named `postgres_data` volume preserves providers, Bees, Hives, runs, memories, and checkpoints across container recreation and `docker compose down`. Remove the corresponding volume mappings from `compose.yaml` if persistence is not wanted. **`docker compose down -v` deletes the database volume and its contents.**
 
+A one-shot container is headless, so the approval default there is `strict`: a gated tool does not run unless the container sets `HOBEES_APPROVAL_MODE=auto` (or `pause`) in `.env` or passes `--approval-mode`. Container identity is `HOBEES_CONTAINER_NAME` if set, otherwise `HOSTNAME` (Docker's 12-char container id), so parallel workers using the same `hobees.yaml` write distinct thread keys — `worker-1:hive:...` vs `worker-2:hive:...` — and each run can be inspected from any other container with `hobees trace --container <name> --thread <id>`.
+
 To load declarative setup, uncomment the optional `./config:/config:ro` mount in `compose.yaml`, set `HOBEES_CONFIG_PATH=/config/hobees.yaml` in `.env`, and place the config file in `./config`. You can instead run a one-time import with `docker compose run --rm hobees init --config /config/hobees.yaml`.
 
 Provider API keys are passed into the runtime container from `.env`; they are not baked into the image. Add any custom API-key environment variables used by your providers to `.env`. The app container runs as the numeric user configured by `HOBEES_UID` and `HOBEES_GID` so it can write to the artifacts and skills bind mounts.
@@ -497,41 +681,52 @@ Provider API keys are passed into the runtime container from `.env`; they are no
 Because PostgreSQL handles concurrent reads/writes safely, usage insights are accessible from three surfaces simultaneously:
 
 ### 1. In-Session Live Ticker
+
 After every run, a concise footer prints:
+
 ```
 tokens: 2,840 in / 1,200 out • $0.0084 • 3 LLM calls
 ```
 
 ### 2. Concurrent Second Terminal
+
 ```bash
 # Query usage from a separate terminal
 hobees stats --window 24h --group-by hive
 ```
+
 The command prints an aggregate table; it does not run a watch dashboard.
 
 ### 3. Local Web API
+
 ```bash
 hobees serve --port 8420
 ```
+
 Launches FastAPI at `http://127.0.0.1:8420` with endpoints:
 
-| Endpoint | Description |
-|----------|-------------|
-| `GET /api/health` | Service and database status |
-| `GET /api/roster` | Providers, Bees, and Hives |
-| `GET /api/runs` | Run history, optionally filtered by status |
-| `GET /api/runs/active` | Active runs |
-| `GET /api/runs/{thread_id}` | Run details and trace |
-| `GET /api/runs/{thread_id}/stream` | SSE trace replay and live updates |
-| `GET /api/stats` | Aggregated usage (`?group_by=bee\|hive\|provider\|day&window=24h`) |
-| `GET /api/stats/recent` | Recent usage events |
-| `GET /api/usage/stream` | SSE usage events |
+| Endpoint                           | Description                                                        |
+| ---------------------------------- | ------------------------------------------------------------------ |
+| `GET /api/health`                  | Service and database status                                        |
+| `GET /api/roster`                  | Providers, Bees, and Hives                                         |
+| `GET /api/runs`                    | Run history, optionally filtered by status                         |
+| `GET /api/runs/active`             | Active runs                                                        |
+| `GET /api/runs/{thread_id}`        | Run details and trace                                              |
+| `GET /api/runs/{thread_id}/stream` | SSE trace replay and live updates                                  |
+| `GET /api/stats`                   | Aggregated usage (`?group_by=bee\|hive\|provider\|day&window=24h`) |
+| `GET /api/stats/recent`            | Recent usage events                                                |
+| `GET /api/usage/stream`            | SSE usage events                                                   |
 
 ---
 
 ## Feature Highlights
 
+### 🔐 Approval Gates & 🧵 Namespaced Threads
+
+See [Approval Gates (HITL)](#-approval-gates-hitl) and [Container-Aware Thread IDs & Trace Inspection](#-container-aware-thread-ids--trace-inspection): per-Bee gated tools, four runtime levels, audited decisions, collision-free container keys, `hobees trace`, and `--replay` / `--resume-decision`.
+
 ### 🤖 Provider Model Auto-Discovery
+
 Fetch available models from local (llama.cpp, Ollama, vLLM, LM Studio) or remote (OpenAI, Anthropic, Gemini, OpenRouter) providers.
 
 ```bash
@@ -540,14 +735,15 @@ Fetch available models from local (llama.cpp, Ollama, vLLM, LM Studio) or remote
 ```
 
 ### 💭 Configurable Thinking Levels
+
 Normalized `thinking_level` (`off` | `low` | `medium` | `high`) per Bee, Hive Supervisor, or session override.
 
-| Provider | `off` | `low` | `medium` | `high` |
-|----------|-------|-------|----------|--------|
-| OpenAI | no reasoning_effort | `low` | `medium` | `high` |
-| Anthropic | no thinking | 1024 tokens | 4096 tokens | 16384 tokens |
-| Google GenAI | thinking_budget=0 | 1024 | 8192 | 24576 |
-| llama.cpp / OpenRouter | reasoning_effort=none, enable_thinking=false | `low` | `medium` | `xhigh` |
+| Provider               | `off`                                        | `low`       | `medium`    | `high`       |
+| ---------------------- | -------------------------------------------- | ----------- | ----------- | ------------ |
+| OpenAI                 | no reasoning_effort                          | `low`       | `medium`    | `high`       |
+| Anthropic              | no thinking                                  | 1024 tokens | 4096 tokens | 16384 tokens |
+| Google GenAI           | thinking_budget=0                            | 1024        | 8192        | 24576        |
+| llama.cpp / OpenRouter | reasoning_effort=none, enable_thinking=false | `low`       | `medium`    | `xhigh`      |
 
 ```bash
 /thinking medium           # Session override
@@ -556,6 +752,7 @@ Normalized `thinking_level` (`off` | `low` | `medium` | `high`) per Bee, Hive Su
 ```
 
 ### 🗜️ Context Efficiency Engine
+
 Four controls to prevent quadratic token growth:
 
 1. **Worker Context Isolation** - Bees receive clean projected context (system prompt + scoped memories + skill headers + subtask), not the raw supervisor message history
@@ -568,13 +765,14 @@ Four controls to prevent quadratic token growth:
 ```
 
 ### 🧠 Cross-Session Scoped Memory
+
 Three namespaces persisted in the configured database:
 
-| Namespace | Scope |
-|-----------|-------|
-| `global` | User preferences, facts across all sessions |
+| Namespace     | Scope                                         |
+| ------------- | --------------------------------------------- |
+| `global`      | User preferences, facts across all sessions   |
 | `hive:<name>` | Project-specific context shared within a hive |
-| `bee:<name>` | Bee-specific learned patterns |
+| `bee:<name>`  | Bee-specific learned patterns                 |
 
 The Queen receives global memories; Hive supervisors receive global and Hive-scoped memories; workers receive global, Hive-scoped, and their own Bee-scoped memories. Memories are loaded when each agent is built. Enable `HOBEES_ENABLE_AUTO_MEMORY=true` to make an additional call to the configured supervisor model after successful Hive runs. It extracts stable preferences into `global` and, for named Hives, durable project facts into `hive:<name>`. Ephemeral Hives save only global preferences. The default is off; enabling it sends the goal and final result to the configured model and may incur extra usage. Extraction is best-effort, so review saved entries with `hobees memory list` and remove incorrect ones with `hobees memory forget`.
 
@@ -585,6 +783,7 @@ The Queen receives global memories; Hive supervisors receive global and Hive-sco
 ```
 
 ### 📜 Progressive Skill Library
+
 Reusable procedural skills stored in the configured database with Markdown sync (`~/.hobees/skills/*.md`).
 
 ```bash
@@ -597,6 +796,7 @@ Reusable procedural skills stored in the configured database with Markdown sync 
 Skills injected as metadata headers; full instructions loaded via `load_skill` tool.
 
 ### 🔄 Skill Drafts from Completed Hive Runs
+
 After a successful Hive run with at least four tool calls or an estimated two handoffs, Hobees makes an additional call to the Hive Supervisor's configured model to look for a reusable procedure. The handoff count is approximated from distinct Bees that used the model. A generated draft is saved on the run record, not automatically added to the skill library.
 
 This applies to Queen-created and one-off Hives, `/goal`, named headless runs such as `hobees hive run dev-team "..." --json`, and interactive Hive chats in the shell or TUI. Interactive shell runs offer to save or edit the draft; the TUI displays a notice, and headless JSON includes `suggested_skill_draft` in the run manifest. Use `hobees skill save-last` from the CLI to review and save a stored draft. The reflection call may incur additional model charges and is not currently included in run usage telemetry.
@@ -607,12 +807,16 @@ This applies to Queen-created and one-off Hives, `/goal`, named headless runs su
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) for contributor guidance and test instructions.
 
+Approval-level behaviour is covered by `tests/test_approvals.py` (resolver precedence, persistence, the headless command, the shell/TUI handlers, and the rule that completion suggestions are words the handler accepts). Container-aware thread namespacing, gate decisions and the Windows-safe trace filename are covered by `tests/test_hitl.py`.
+
 ### Prerequisites
+
 - Python 3.11+
 - PostgreSQL 15+ (recommended for multi-process use; file-backed SQLite is supported for local use)
 - `uv` (package manager)
 
 ### Setup
+
 ```bash
 git clone https://github.com/essaam/hobees
 cd hobees
@@ -626,6 +830,7 @@ uv run hobees init
 ```
 
 ### High-Level Project Structure
+
 ```text
 hobees/
 ├── src/hobees/       # Application package
@@ -642,6 +847,7 @@ hobees/
 ```
 
 ### Adding Custom Tools
+
 1. Add a new `@tool` function in `core/tool_registry.py`
 2. Register it in `TOOL_REGISTRY`
 3. Bees can now reference it by key in `tool_names`

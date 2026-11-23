@@ -24,9 +24,15 @@ def test_resolve_thread_id_namespaces_and_preserves_full_key(monkeypatch):
 
 
 def test_resolve_approval_mode_precedence(monkeypatch):
+    # Neutralise the developer's saved global setting: this test is about
+    # precedence, not about what happens to be in ~/.hobees/.env.
+    from hobees import config
+
+    monkeypatch.setattr(config.settings, "approval_mode", None)
     monkeypatch.setenv("HOBEES_APPROVAL_MODE", "pause")
     assert resolve_approval_mode("strict") == "strict"
     assert resolve_approval_mode() == "pause"
+    assert resolve_approval_mode(session_mode="auto") == "auto"  # session beats env
     monkeypatch.delenv("HOBEES_APPROVAL_MODE")
     assert resolve_approval_mode(interactive=True) == "interactive"
     assert resolve_approval_mode(interactive=False) == "strict"
