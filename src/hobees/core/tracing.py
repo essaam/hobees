@@ -28,7 +28,9 @@ logger = logging.getLogger(__name__)
 
 def trace_filename(thread_id: str) -> str:
     """Return a platform-safe JSONL filename for a namespaced thread ID."""
-    return f"{thread_id.replace(':', '__')}.jsonl"
+    from hobees.core.paths import safe_path_component
+
+    return f"{safe_path_component(thread_id)}.jsonl"
 
 _SENSITIVE_KEY = re.compile(
     r"(?:api[_-]?key|access[_-]?token|refresh[_-]?token|authorization|password|passwd|secret|credential)",

@@ -1,4 +1,4 @@
-"""FastAPI Web Application for hobees Visual Trace Explorer & Hive Studio.
+"""FastAPI Web Application for hobees Workbench, Studio & Trace Explorer.
 
 Serves:
 1. Bundled React SPA static assets from ``src/hobees/web/static/`` (zero Node runtime)
@@ -1202,7 +1202,7 @@ def create_web_app(read_only: bool = False) -> FastAPI:
     """Create the FastAPI web application serving API + bundled SPA."""
     app = FastAPI(
         title="hobees Web UI",
-        description="Visual Trace Explorer & Hive Studio",
+        description="Workbench, Studio and Trace Explorer SPA",
         version=_package_version(),
     )
 
@@ -1813,7 +1813,7 @@ def create_web_app(read_only: bool = False) -> FastAPI:
                     else session.query(LLMProvider).order_by(LLMProvider.id).first()
                 )
                 if not provider:
-                    raise HTTPException(400, "No LLM providers configured. Add a provider in Hive Studio first.")
+                    raise HTTPException(400, "No LLM providers configured. Add a provider in Studio first.")
 
                 # A model picked in the Workbench wins; otherwise fall back to the
                 # provider's assistant/default model. Without any of them the run
@@ -1824,7 +1824,7 @@ def create_web_app(read_only: bool = False) -> FastAPI:
                     raise HTTPException(
                         400,
                         f"Pick a model for provider '{provider.alias}' — it has no assistant or default "
-                        "model. Use the Workbench model picker, or detect models in Hive Studio.",
+                        "model. Use the Workbench model picker, or detect models in Studio.",
                     )
 
                 assistant = session.query(Bee).filter_by(name="assistant").first()

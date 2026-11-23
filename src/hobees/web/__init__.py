@@ -1,6 +1,6 @@
 """hobees Web Application (Phase 7).
 
-Serves the Visual Trace Explorer and Hive Studio SPA via FastAPI.
+Serves the Workbench, Studio and Trace Explorer SPA via FastAPI.
 Zero-Node runtime: static assets are bundled inside the Python wheel.
 """
 

@@ -326,7 +326,7 @@ export function Workbench() {
                   assistantProvider
                     ? assistantProvider.available_models.length
                       ? `${assistantProvider.available_models.length} auto-detected models`
-                      : 'No models detected for this provider yet — detect them in Hive Studio'
+                      : 'No models detected for this provider yet — detect them in Studio'
                     : 'Select a provider first'
                 }
                 className="rounded-lg border border-zinc-200 bg-white px-2.5 py-1.5 text-xs font-medium text-zinc-800 focus:border-amber-500 focus:outline-none"
@@ -482,7 +482,7 @@ export function Workbench() {
                 onClick={() => navigate(`/studio?tab=${scope === 'hive' ? 'hives' : 'bees'}`)}
                 className="text-xs font-medium text-amber-700 hover:text-amber-800"
               >
-                Create a {scope} in Hive Studio →
+                Create a {scope} in Studio →
               </button>
             )}
           </div>

@@ -59,6 +59,17 @@ def test_command_palette_handles_arrow_keys_from_any_focus():
     assert "↑↓" not in palette
 
 
+def test_the_studio_view_is_labelled_studio():
+    layout = read("components/Layout.tsx")
+    studio = read("pages/Studio.tsx")
+    workbench = read("pages/Workbench.tsx")
+    assert "{ to: '/studio', label: 'Studio'" in layout
+    assert ">Studio</h1>" in studio
+    # Nothing in the UI should still call it "Hive Studio".
+    for source in (layout, studio, workbench):
+        assert "Hive Studio" not in source
+
+
 def test_model_picker_is_shared_by_provider_bee_and_hive_dialogs():
     studio = read("pages/Studio.tsx")
     assert "function ModelPicker" in studio

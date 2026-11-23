@@ -20,7 +20,7 @@ import { ContainerSelector } from './ContainerSelector';
 const NAV_ITEMS = [
   { to: '/', label: 'Workbench', icon: Sparkles, end: true },
   { to: '/traces', label: 'Runs & Traces', icon: GitBranch, end: false },
-  { to: '/studio', label: 'Hive Studio', icon: Wrench, end: false },
+  { to: '/studio', label: 'Studio', icon: Wrench, end: false },
   { to: '/storage', label: 'Memory & Artifacts', icon: Database, end: false },
 ] as const;
 

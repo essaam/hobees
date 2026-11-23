@@ -825,7 +825,7 @@ def web(
     open_browser: bool = typer.Option(False, "--open", help="Open browser on startup"),
     read_only: bool = typer.Option(False, "--read-only", help="Disable mutating endpoints"),
 ) -> None:
-    """Launch the hobees Web UI (Visual Trace Explorer & Hive Studio)."""
+    """Launch the hobees Web UI (Workbench, Studio & Trace Explorer)."""
     import threading
     import webbrowser
     import uvicorn

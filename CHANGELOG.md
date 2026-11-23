@@ -11,7 +11,7 @@ to a heading matching that version and add the release date.
 - Web UI: the assistant chat now uses an explicitly selected model. The Workbench
   shows a model picker built from the provider's auto-detected models and the
   selection is remembered per provider.
-- Web UI: the Provider, Bee and Hive dialogs in Hive Studio share one model picker
+- Web UI: the Provider, Bee and Hive dialogs in Studio share one model picker
   with a **Detect models** action (provider auto-detection) and an inline
   **Test model** check that runs a single minimal completion.
 - Web API: `GET /api/v1/providers/models` (auto-detection, cached on the provider
@@ -27,6 +27,10 @@ to a heading matching that version and add the release date.
   preview a Bee is shown now names the directory it can actually read back, and
   tool path resolution returns `ERROR:` for a path that cannot exist on the
   platform instead of raising `OSError` (`[WinError 123]`) during a run.
+- Web UI: the Studio view is now labelled **Studio** (previously "Hive Studio") in
+  the navigation, the page heading, the Workbench links to it and the API messages
+  that point users there; `specs/webapp.md`, the FastAPI description and the
+  `hobees web` help text match.
 - Web UI: the Workbench provider/target picker no longer resets to the first
   entry when switching views or the Assistant/Hive/Bee tabs. Pickers now live in
   the app context per scope and are persisted (localStorage), so the chosen

@@ -150,7 +150,7 @@ export function Studio() {
       {/* Header + Visual/YAML Toggle */}
       <div className="flex flex-wrap items-end justify-between gap-3">
         <div>
-          <h1 className="text-xl font-semibold tracking-tight text-zinc-900">Hive Studio</h1>
+          <h1 className="text-xl font-semibold tracking-tight text-zinc-900">Studio</h1>
           <p className="mt-0.5 text-sm text-zinc-500">
             Configure Hives, Worker Bees, tool approval gates, Providers, and Skills.
           </p>
