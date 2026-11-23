@@ -4,6 +4,7 @@ session/global resolution every front-end uses."""
 
 import asyncio
 import json
+import re
 from unittest.mock import Mock
 
 import pytest
@@ -52,6 +53,17 @@ def isolated_approval_settings(monkeypatch, tmp_path):
 
 def runner():
     return CliRunner()
+
+
+def plain(output: str) -> str:
+    """Help text as authored, without Rich styling codes or panel wrapping noise.
+
+    Typer renders help with a Rich console, which emits ANSI codes in CI and
+    wraps lines at the terminal width; both can split a phrase that the help
+    actually contains. Strip the codes and collapse whitespace so the assertions
+    check the text itself rather than its rendering.
+    """
+    return " ".join(re.sub(r"\x1b\[[0-9;]*m", "", output).split())
 
 
 def test_normalise_and_scope_parsing():
@@ -139,7 +151,7 @@ def _cli(monkeypatch, tmp_path, args, global_mode=None):
 def test_headless_cli_reports_and_persists_levels(monkeypatch, tmp_path):
     result = _cli(monkeypatch, tmp_path, ["approvals"], global_mode="strict")
     assert result.exit_code == 0
-    assert "Approval level (global): strict" in result.output
+    assert "Approval level (global): strict" in plain(result.output)
 
     result = _cli(monkeypatch, tmp_path, ["approvals", "set", "auto"])
     assert result.exit_code == 0
@@ -147,25 +159,25 @@ def test_headless_cli_reports_and_persists_levels(monkeypatch, tmp_path):
 
     # The bare form (`hobees approvals auto`) is the same command.
     result = _cli(monkeypatch, tmp_path, ["approvals", "pause"])
-    assert "Global approval level set to 'pause'." in result.output
+    assert "Global approval level set to 'pause'." in plain(result.output)
 
     result = _cli(monkeypatch, tmp_path, ["approvals", "clear"])
-    assert "Global approval level cleared" in result.output
+    assert "Global approval level cleared" in plain(result.output)
 
     bad = _cli(monkeypatch, tmp_path, ["approvals", "yes-please"])
     assert bad.exit_code == 1
-    assert "Invalid approval level" in bad.output
+    assert "Invalid approval level" in plain(bad.output)
 
 
 def test_headless_cli_session_flag_does_not_persist(monkeypatch, tmp_path):
     result = _cli(monkeypatch, tmp_path, ["approvals", "--session", "auto"], global_mode="strict")
     assert result.exit_code == 0
-    assert "Approval level (session override): auto" in result.output
+    assert "Approval level (session override): auto" in plain(result.output)
     assert not (tmp_path / ".env").exists()
 
     # JSON output keeps headless/CI callers parseable.
     result = _cli(monkeypatch, tmp_path, ["approvals", "--session", "auto", "--json"], global_mode="strict")
-    payload = json.loads(" ".join(result.output.split()))
+    payload = json.loads(plain(result.output))
     assert payload["level"] == "auto"
     assert payload["source"] == "session override"
     assert payload["global"] == "strict"
@@ -174,7 +186,7 @@ def test_headless_cli_session_flag_does_not_persist(monkeypatch, tmp_path):
 def test_headless_help_explains_levels_and_usage(monkeypatch, tmp_path):
     result = _cli(monkeypatch, tmp_path, ["approvals", "--help"])
     assert result.exit_code == 0
-    out = result.output
+    out = plain(result.output)
 
     assert "Usage: hobees approvals" in out
     # Every level is named *and* explained, not just listed.
@@ -184,11 +196,12 @@ def test_headless_help_explains_levels_and_usage(monkeypatch, tmp_path):
         assert meaning.split()[0] in out
     assert "Approve / Edit / Reject" in out
     assert "persist globally" in out and "--session" in out and "--json" in out
+    assert "Precedence:" in out
 
     # The alias spells the same help.
     alias = _cli(monkeypatch, tmp_path, ["permissions", "--help"])
     assert alias.exit_code == 0
-    assert "Levels" in alias.output and "require_approval" in alias.output
+    assert "Levels" in plain(alias.output) and "require_approval" in plain(alias.output)
 
 
 def test_headless_permissions_alias_is_registered(monkeypatch, tmp_path):
