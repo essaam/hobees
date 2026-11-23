@@ -819,6 +819,43 @@ def serve(
 
 
 @app.command()
+def web(
+    port: int = typer.Option(8080, "--port", "-p", help="Web UI bind port"),
+    host: str = typer.Option("127.0.0.1", "--host", "-h", help="Web UI bind host"),
+    open_browser: bool = typer.Option(False, "--open", help="Open browser on startup"),
+    read_only: bool = typer.Option(False, "--read-only", help="Disable mutating endpoints"),
+) -> None:
+    """Launch the hobees Web UI (Visual Trace Explorer & Hive Studio)."""
+    import threading
+    import webbrowser
+    import uvicorn
+    from hobees.db.session import get_engine
+    from hobees.web.app import create_web_app
+
+    _ensure_database_initialized(get_engine())
+
+    display_host = "127.0.0.1" if host in {"0.0.0.0", "::"} else host
+    url = f"http://{display_host}:{port}"
+    console.print(f"{APP} Starting hobees Web UI on http://{host}:{port}")
+
+    if read_only:
+        console.print(f"  {WARN} Read-only mode enabled — mutating endpoints disabled.")
+    elif host not in {"127.0.0.1", "localhost", "::1"}:
+        console.print(
+            f"  {WARN} [bold yellow]Security Warning:[/bold yellow] Binding to {host} without --read-only. "
+            "Place this dashboard behind authentication (reverse proxy / VPN) because approving "
+            "tool calls or running hives can execute file writes or commands."
+        )
+
+    web_app = create_web_app(read_only=read_only)
+
+    if open_browser:
+        threading.Timer(0.8, lambda: webbrowser.open(url)).start()
+
+    uvicorn.run(web_app, host=host, port=port, log_level="info")
+
+
+@app.command()
 def prompt(
     goal: str = typer.Argument(..., help="Goal to execute in single-shot print mode"),
     provider: str = typer.Option(None, "--provider", help="Provider alias to use"),

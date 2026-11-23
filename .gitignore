@@ -16,3 +16,7 @@ specs/
 artifacts/
 skills/
 
+# Frontend build dependencies
+web-ui/node_modules/
+
+
