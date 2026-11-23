@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import sys
 import uuid
+import json
 from collections.abc import Sequence
 from datetime import datetime, timezone
 from pathlib import Path
@@ -211,6 +212,9 @@ def _run_migrations(engine) -> None:
             if "thinking_level" not in columns:
                 conn.execute(text("ALTER TABLE bees ADD COLUMN thinking_level VARCHAR(16) DEFAULT 'off'"))
                 console.print(f"{SUCCESS} Added column: bees.thinking_level")
+            if "require_approval" not in columns:
+                conn.execute(text("ALTER TABLE bees ADD COLUMN require_approval JSON DEFAULT '[]'"))
+                console.print(f"{SUCCESS} Added column: bees.require_approval")
             conn.commit()
     
     # Check and add supervisor_thinking_level to hives
@@ -229,6 +233,8 @@ def _run_migrations(engine) -> None:
     if "runs" in inspector.get_table_names():
         columns = [c["name"] for c in inspector.get_columns("runs")]
         with engine.connect() as conn:
+            if "container_name" not in columns:
+                conn.execute(text("ALTER TABLE runs ADD COLUMN container_name VARCHAR(128)"))
             if "compacted_count" not in columns:
                 conn.execute(text("ALTER TABLE runs ADD COLUMN compacted_count INTEGER DEFAULT 0"))
                 console.print(f"{SUCCESS} Added column: runs.compacted_count")
@@ -244,6 +250,16 @@ def _run_migrations(engine) -> None:
                 console.print(f"{SUCCESS} Added column: runs.artifacts_dir")
             conn.commit()
         _migrate_json_column(engine, "runs", "suggested_skill_draft")
+
+    # Trace observability enrichment
+    if "usage_events" in inspector.get_table_names():
+        columns = [c["name"] for c in inspector.get_columns("usage_events")]
+        with engine.connect() as conn:
+            if "container_name" not in columns:
+                conn.execute(text("ALTER TABLE usage_events ADD COLUMN container_name VARCHAR(128)"))
+            if "checkpoint_id" not in columns:
+                conn.execute(text("ALTER TABLE usage_events ADD COLUMN checkpoint_id VARCHAR(128)"))
+            conn.commit()
     
     # Create new tables if they don't exist (memories, skills, bee_skills)
     # These will be created by Base.metadata.create_all() anyway
@@ -532,6 +548,142 @@ def init(
             import_config(cfg_path, dry_run=False, force=True)
         else:
             console.print(f"{WARN} Config path {cfg_path} not found.")
+
+
+@app.command()
+def trace(
+    thread: str | None = typer.Option(None, "--thread", "-t", help="Thread ID or short thread suffix"),
+    container: str | None = typer.Option(None, "--container", "-c", help="Container/instance name"),
+    hive: str | None = typer.Option(None, "--hive", help="Hive entity name"),
+    list_threads: bool = typer.Option(False, "--list", help="List recent threads"),
+    limit: int = typer.Option(20, "--limit", help="Maximum threads to list"),
+    output_json: bool = typer.Option(False, "--json", help="Emit structured JSON"),
+) -> None:
+    """Inspect namespaced runs and approval gates."""
+    from hobees.core.approval import resolve_container_name, resolve_thread_id
+    from hobees.core.tracing import trace_filename
+    from hobees.db.models import ApprovalEvent, Run, UsageEvent
+    from hobees.db.session import session_scope
+
+    container = resolve_container_name(container)
+
+    with session_scope() as session:
+        if list_threads:
+            query = session.query(Run)
+            if container:
+                query = query.filter(
+                    (Run.container_name == container) | (Run.container_name.is_(None))
+                )
+            if hive:
+                from hobees.db.models import Hive
+                hive_row = session.query(Hive).filter_by(name=hive).first()
+                if hive_row:
+                    query = query.filter(Run.hive_id == hive_row.id)
+            runs = query.order_by(Run.started_at.desc()).limit(limit).all()
+            rows = [
+                {
+                    "container": run.container_name or container,
+                    "thread": run.thread_id,
+                    "status": run.status,
+                    "goal": run.goal,
+                    "started_at": run.started_at.isoformat() if run.started_at else None,
+                }
+                for run in runs
+            ]
+            if output_json:
+                console.print_json(json.dumps(rows))
+            else:
+                table = Table(title="Recent Trace Threads")
+                table.add_column("Container")
+                table.add_column("Thread")
+                table.add_column("Status")
+                table.add_column("Goal")
+                for row in rows:
+                    table.add_row(row["container"], row["thread"], row["status"], row["goal"][:80])
+                console.print(table)
+            return
+
+        if not thread:
+            console.print(f"{ERROR} Specify --thread or --list")
+            raise typer.Exit(code=1)
+        resolved = resolve_thread_id(
+            "hive" if hive else "hive",
+            hive or "default",
+            thread,
+            container,
+        )
+
+        approvals = session.query(ApprovalEvent).filter_by(thread_id=resolved).all()
+        usage = session.query(UsageEvent).filter_by(thread_id=resolved).all()
+        run = session.query(Run).filter_by(thread_id=resolved).first()
+
+    trace_events = []
+    trace_roots = [Path.cwd() / "artifacts", Path.home() / ".hobees" / "artifacts"]
+    expected_name = trace_filename(resolved)
+    for root in trace_roots:
+        if root.exists():
+            for path in root.rglob(expected_name):
+                try:
+                    for line in path.read_text(encoding="utf-8").splitlines():
+                        if line.strip():
+                            trace_events.append(json.loads(line))
+                except (OSError, json.JSONDecodeError):
+                    continue
+
+    approval_rows = []
+    for event in approvals:
+        wait_ms = None
+        if event.resolved_at and event.requested_at:
+            wait_ms = int((event.resolved_at - event.requested_at).total_seconds() * 1000)
+        approval_rows.append({
+            "checkpoint_id": event.checkpoint_id,
+            "bee": event.bee_name,
+            "tool": event.tool_name,
+            "tool_call_id": event.tool_call_id,
+            "mode": event.approval_mode,
+            "decision": event.decision,
+            "wait_ms": wait_ms,
+            "original_args": json.loads(event.original_args_json or "{}"),
+            "final_args": json.loads(event.final_args_json) if event.final_args_json else None,
+            "reason": event.reason,
+        })
+
+    usage_rows = [
+        {
+            "bee": item.bee_name,
+            "model": item.model_name,
+            "latency_ms": item.latency_ms,
+            "input_tokens": item.input_tokens,
+            "output_tokens": item.output_tokens,
+            "checkpoint_id": item.checkpoint_id,
+        }
+        for item in usage
+    ]
+    result = {
+        "container": container,
+        "thread": resolved,
+        "status": run.status if run else ("awaiting_approval" if approvals and any(a.decision == "pending" for a in approvals) else "unknown"),
+        "checkpoints": [],
+        "events": trace_events,
+        "approvals": approval_rows,
+        "usage": usage_rows,
+    }
+    if output_json:
+        console.print_json(json.dumps(result))
+    else:
+        console.print(f"[bold]Thread:[/bold] {resolved}")
+        console.print(f"[bold]Status:[/bold] {result['status']}")
+        for approval in approval_rows:
+            console.print(
+                f"  GATE {approval['mode']}: {approval['tool']} "
+                f"[{approval['decision']}] bee={approval['bee']}"
+            )
+        for event in trace_events:
+            console.print(
+                f"  [{event.get('event_type')}] "
+                f"{event.get('source')}"
+                f"{' -> ' + event.get('target') if event.get('target') else ''}"
+            )
 
 
 @app.command()

@@ -84,6 +84,8 @@ class TelemetryCallbackHandler(BaseCallbackHandler):
         run_id: int | None = None,
         rates: _RateTable | None = None,
         tool_calls: list[Any] | None = None,
+        container_name: str | None = None,
+        checkpoint_id: str | None = None,
     ) -> None:
         self.bee_name = bee_name
         self.provider_alias = provider_alias
@@ -92,6 +94,8 @@ class TelemetryCallbackHandler(BaseCallbackHandler):
         self.run_id = run_id
         self._rates = rates or {}
         self._tool_calls = tool_calls or []
+        self.container_name = container_name
+        self.checkpoint_id = checkpoint_id
         self._starts: dict[str, float] = {}
 
     # -- LangChain callback API -------------------------------------------
@@ -165,10 +169,12 @@ class TelemetryCallbackHandler(BaseCallbackHandler):
                     """
                     INSERT INTO usage_events
                         (run_id, thread_id, bee_name, provider_alias, model_name,
+                         container_name, checkpoint_id,
                          input_tokens, output_tokens, estimated_cost_usd,
                          latency_ms, tool_calls)
                     VALUES
                         (:run_id, :thread_id, :bee_name, :provider_alias, :model_name,
+                         :container_name, :checkpoint_id,
                          :input_tokens, :output_tokens, :estimated_cost_usd,
                          :latency_ms, :tool_calls)
                     """
@@ -176,6 +182,8 @@ class TelemetryCallbackHandler(BaseCallbackHandler):
                 {
                     "run_id": db_run_id,
                     "thread_id": self.thread_id,
+                    "container_name": self.container_name,
+                    "checkpoint_id": self.checkpoint_id,
                     "bee_name": self.bee_name,
                     "provider_alias": self.provider_alias,
                     "model_name": self.model_name,

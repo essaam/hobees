@@ -44,6 +44,7 @@ def cmd_bee_create(
     temperature: float = 0.0,
     tool_names: str = "",
     thinking_level: str = "off",
+    require_approval: str = "",
 ) -> None:
     """Create a new Worker Bee."""
     from hobees.db.session import session_scope
@@ -51,6 +52,12 @@ def cmd_bee_create(
     from hobees.core.model_discovery import fetch_provider_models
 
     tools = _parse_tool_names(tool_names)
+    approval_tools = _parse_tool_names(require_approval)
+    unknown = [name for name in approval_tools if name not in tools]
+    if unknown:
+        console.print(
+            f"{WARN} require_approval tools must also be in tools: {', '.join(unknown)}"
+        )
     with session_scope() as session:
         provider = session.get(LLMProvider, provider_id)
         if not provider:
@@ -77,6 +84,7 @@ def cmd_bee_create(
             temperature=temperature,
             thinking_level=thinking_level,
             tool_names=tools,
+            require_approval=approval_tools,
         )
         session.add(bee)
         session.flush()
@@ -131,6 +139,7 @@ def cmd_bee_update(
     system_prompt: str | None = None,
     role_description: str | None = None,
     tool_names: str = "",
+    require_approval: str = "",
 ) -> None:
     """Hot-swap provider, model, temperature, tools, or prompts mid-session."""
     from hobees.db.session import session_scope
@@ -168,6 +177,14 @@ def cmd_bee_update(
             bee.role_description = role_description
         if tool_names != "":
             bee.tool_names = _parse_tool_names(tool_names)
+        if require_approval != "":
+            approval_tools = _parse_tool_names(require_approval)
+            unknown = [name for name in approval_tools if name not in bee.tool_names]
+            if unknown:
+                console.print(
+                    f"{WARN} require_approval tools must also be in tools: {', '.join(unknown)}"
+                )
+            bee.require_approval = approval_tools
 
         # Interactive model picker if model changed and provider has models
         if model_name is not None and provider:

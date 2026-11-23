@@ -175,6 +175,15 @@ def _import_bees(config: dict, provider_alias_to_id: Dict[str, int], dry_run: bo
             tool_names = b.get("tools", [])
             if isinstance(tool_names, str):
                 tool_names = [t.strip() for t in tool_names.split(",") if t.strip()]
+            require_approval = b.get("require_approval", [])
+            if isinstance(require_approval, str):
+                require_approval = [t.strip() for t in require_approval.split(",") if t.strip()]
+            unknown = [name for name in require_approval if name not in tool_names]
+            if unknown:
+                console.print(
+                    f"{WARN} Bee {name!r}: require_approval contains tools outside tools: "
+                    f"{', '.join(unknown)}"
+                )
 
             existing = session.query(Bee).filter_by(name=name).first()
             if existing:
@@ -189,6 +198,7 @@ def _import_bees(config: dict, provider_alias_to_id: Dict[str, int], dry_run: bo
                 existing.temperature = b.get("temperature", 0.0)
                 existing.thinking_level = b.get("thinking_level", "off")
                 existing.tool_names = tool_names
+                existing.require_approval = require_approval
                 bee_name_to_id[name] = existing.id
                 console.print(f"  {SUCCESS} Updated bee: {name}")
                 continue
@@ -206,6 +216,7 @@ def _import_bees(config: dict, provider_alias_to_id: Dict[str, int], dry_run: bo
                 temperature=b.get("temperature", 0.0),
                 thinking_level=b.get("thinking_level", "off"),
                 tool_names=tool_names,
+                require_approval=require_approval,
             )
             session.add(bee)
             session.flush()
