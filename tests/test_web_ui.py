@@ -63,6 +63,37 @@ def test_command_palette_handles_arrow_keys_from_any_focus():
     assert "↑↓" not in palette
 
 
+def test_studio_has_a_containers_tab_wired_to_the_api():
+    studio = read("pages/Studio.tsx")
+    assert "type StudioTab = 'hives' | 'bees' | 'providers' | 'skills' | 'containers'" in studio
+    assert "ContainersTab" in studio
+    assert "useContainerPlan" in studio
+    assert "useSaveContainerFiles" in studio
+    assert "useRunContainerAction" in studio
+    assert "Save to project" in studio
+    assert "Export compose" in studio
+    assert "docker is not available on this host" in studio
+    assert "Only allowlisted docker compose subcommands are run." in studio
+
+    client = read("api/client.ts")
+    for endpoint in ("/containers/plan", "/containers/files", "/containers/action"):
+        assert endpoint in client
+
+    hooks = read("hooks/useApi.ts")
+    for hook in ("useContainerPlan", "useBuildContainerPlan", "useSaveContainerFiles", "useRunContainerAction"):
+        assert hook in hooks
+
+    types = read("types/index.ts")
+    assert "ContainerPlanResponse" in types
+    assert "ContainerActionResponse" in types
+    assert "ContainerSpec" in types
+
+
+    palette = read("components/CommandPalette.tsx")
+    assert "tab=containers" in palette
+    assert "Container preparation" in palette
+
+
 def test_workbench_surfaces_gates_open_on_its_own_run():
     workbench = read("pages/Workbench.tsx")
     assert "pendingApprovals" in workbench

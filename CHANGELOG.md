@@ -27,6 +27,16 @@ to a heading matching that version and add the release date.
   preview a Bee is shown now names the directory it can actually read back, and
   tool path resolution returns `ERROR:` for a path that cannot exist on the
   platform instead of raising `OSError` (`[WinError 123]`) during a run.
+- Web UI: Studio has a **Containers** tab that generates a custom `compose.yaml` and
+  `Dockerfile` from the live settings and the registered providers, shows the validation
+  warnings, saves the two files to the project root or exports them for download, and can
+  spin the stack up/down with `Start`, `Status`, `Logs` and `Stop`. Environment values stay
+  `${NAME}` references (never literal keys), the generated Dockerfile runs as a non-root
+  user with `uv sync --no-dev`, and the web layer only ever runs the allowlisted
+  `docker compose` subcommands (`up`, `down`, `ps`, `logs`) with fixed arguments; anything
+  else is rejected, and actions are disabled in `--read-only` mode or when `docker` is not
+  installed on the host. Endpoints: `GET/POST /api/v1/containers/plan`,
+  `POST /api/v1/containers/files`, `POST /api/v1/containers/action`.
 - Web UI: the Workbench now shows a gate that is open on the run it is watching
   (Approve / Edit / Reject inline, plus an `Awaiting approval` status), instead of
   only in the Approvals drawer.

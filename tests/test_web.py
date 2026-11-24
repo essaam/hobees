@@ -13,7 +13,7 @@ from fastapi.testclient import TestClient
 
 from hobees.config import settings
 from hobees.core.tracing import trace_filename
-from hobees.db.models import ApprovalEvent, Base, Bee, Run, UsageEvent
+from hobees.db.models import ApprovalEvent, Base, Bee, LLMProvider, Run, UsageEvent
 from hobees.db.session import dispose_engine, get_engine, session_scope
 from hobees.web.app import create_web_app
 
@@ -33,6 +33,88 @@ def web_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     yield tmp_path, artifacts_dir
 
     dispose_engine()
+
+
+def test_container_plan_and_files_endpoints(web_env, monkeypatch):
+    tmp_path, artifacts = web_env
+    monkeypatch.setenv("HOBEES_PROJECT_ROOT", str(tmp_path))
+    monkeypatch.setattr("hobees.core.container_prep.shutil.which", lambda _name: None)
+
+    client = TestClient(create_web_app())
+
+    with session_scope() as session:
+        session.add(
+            LLMProvider(
+                alias="container-provider",
+                provider_type="openai",
+                base_url=None,
+                api_key_env="OPENAI_API_KEY",
+                default_model="m",
+                input_cost_per_1m=0.0,
+                output_cost_per_1m=0.0,
+            )
+        )
+        session.commit()
+
+    plan = client.get("/api/v1/containers/plan").json()
+    assert "services:" in plan["compose"]
+    assert "${OPENAI_API_KEY}" in plan["compose"]
+    assert plan["docker_available"] is False
+    assert plan["project_dir"] == str(tmp_path)
+    assert plan["compose_exists"] is False
+
+    custom = client.post(
+        "/api/v1/containers/plan",
+        json={"service": "worker", "profiles": ["dev"], "include_db": False},
+    )
+    assert custom.status_code == 200
+    body = custom.json()
+    assert "worker" in body["compose"]
+    assert "db" not in body["compose"]
+
+    bad = client.post("/api/v1/containers/plan", json={"service": "Bad Service"})
+    assert any("valid compose service key" in warning for warning in bad.json()["warnings"])
+
+    saved = client.post(
+        "/api/v1/containers/files",
+        json={
+            "compose": "services:\n  app:\n    build: .\n    environment:\n      OPENAI_API_KEY: sk-live\n",
+            "dockerfile": "FROM python:3.12-slim\nUSER hobees\n",
+        },
+    )
+    assert saved.status_code == 200
+    assert saved.json()["success"] is True
+    assert (tmp_path / "compose.yaml").is_file()
+    assert (tmp_path / "Dockerfile").is_file()
+    assert any("literal value" in warning for warning in saved.json()["warnings"])
+
+    rejected = client.post("/api/v1/containers/action", json={"action": "exec"})
+    assert rejected.status_code == 400
+    assert "must be one of" in rejected.json()["detail"]
+
+    unavailable = client.post("/api/v1/containers/action", json={"action": "ps"})
+    assert unavailable.status_code == 200
+    assert unavailable.json()["success"] is False
+    assert "docker is not available" in unavailable.json()["detail"]
+    assert unavailable.json()["command"] == ["docker", "compose", "-f", "compose.yaml", "ps"]
+
+    # Files must land inside the project root, whatever the request claims.
+    outside = client.post(
+        "/api/v1/containers/files",
+        json={"compose": "services: {}", "dockerfile": "FROM x"},
+    )
+    assert outside.status_code == 200
+    assert str(tmp_path) in outside.json()["project_dir"]
+
+    readonly = TestClient(create_web_app(read_only=True))
+    blocked = readonly.post(
+        "/api/v1/containers/files",
+        json={"compose": "services: {}", "dockerfile": "FROM x"},
+    )
+    assert blocked.status_code == 403
+    assert "Read-only" in blocked.json()["detail"]
+    assert readonly.get("/api/v1/containers/plan").status_code == 200
+    assert artifacts.exists()
 
 
 def test_static_assets_and_spa_routing(web_env):

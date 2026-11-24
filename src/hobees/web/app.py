@@ -14,6 +14,7 @@ import json
 import logging
 import mimetypes
 import os
+import subprocess
 import tempfile
 import time
 import uuid
@@ -35,6 +36,7 @@ from hobees.core.approval import (
     resolve_container_name,
     resolve_thread_id,
 )
+from hobees.core.container_prep import ContainerSpec
 from hobees.core.tracing import (
     EventBroker,
     HiveTraceCallbackHandler,
@@ -403,6 +405,36 @@ class ArtifactItem(BaseModel):
 class ArtifactListResponse(BaseModel):
     artifacts: list[ArtifactItem]
     hives: list[str] = Field(default_factory=list)
+
+
+class ContainerPlanResponse(BaseModel):
+    spec: dict[str, Any]
+    compose: str
+    dockerfile: str
+    warnings: list[str] = Field(default_factory=list)
+    docker_available: bool
+    project_dir: str
+    compose_exists: bool
+    dockerfile_exists: bool
+
+
+class ContainerFilesRequest(BaseModel):
+    compose: str
+    dockerfile: str
+
+
+class ContainerActionRequest(BaseModel):
+    action: str
+    service: Optional[str] = None
+    detach: bool = True
+    tail: Optional[int] = None
+
+
+class ContainerActionResponse(BaseModel):
+    success: bool
+    command: list[str]
+    output: str
+    detail: Optional[str] = None
 
 
 # ---------------------------------------------------------------------------
@@ -1265,6 +1297,85 @@ def create_web_app(read_only: bool = False) -> FastAPI:
                 if name:
                     containers.add(name)
         return ContainerListResponse(containers=sorted(containers))
+
+    # --- Container preparation (Studio Containers tab) ---
+
+    def _container_plan_response(spec) -> ContainerPlanResponse:
+        from hobees.core import container_prep
+
+        root = container_prep.project_root()
+        return ContainerPlanResponse(
+            spec=spec.model_dump(),
+            compose=container_prep.compose_yaml(spec),
+            dockerfile=container_prep.dockerfile_text(spec),
+            warnings=spec.warnings(),
+            docker_available=container_prep.docker_available(),
+            project_dir=str(root),
+            compose_exists=(root / container_prep.DEFAULT_COMPOSE_FILE).is_file(),
+            dockerfile_exists=(root / container_prep.DEFAULT_DOCKERFILE).is_file(),
+        )
+
+    @app.get("/api/v1/containers/plan", response_model=ContainerPlanResponse)
+    async def container_plan():
+        """Default compose/Dockerfile built from the live settings and providers."""
+        from hobees.core import container_prep
+
+        with session_scope() as session:
+            key_envs = [p.api_key_env for p in session.query(LLMProvider).all()]
+        return _container_plan_response(container_prep.default_spec(key_envs))
+
+    @app.post("/api/v1/containers/plan", response_model=ContainerPlanResponse)
+    async def build_container_plan(spec: ContainerSpec):
+        """Preview a custom spec without saving anything."""
+        return _container_plan_response(spec)
+
+    @app.post("/api/v1/containers/files")
+    async def save_container_files(body: ContainerFilesRequest):
+        """Write compose.yaml / Dockerfile to the project root (fixed names)."""
+        from hobees.core import container_prep
+
+        _, warnings = container_prep.validate_compose(body.compose)
+        saved = container_prep.save_project_files(body.compose, body.dockerfile)
+        return {
+            "success": True,
+            "saved": [str(path) for path in saved],
+            "warnings": warnings,
+            "project_dir": str(container_prep.project_root()),
+        }
+
+    @app.post("/api/v1/containers/action", response_model=ContainerActionResponse)
+    async def run_container_action(body: ContainerActionRequest):
+        """Run one allowlisted `docker compose` subcommand, never an arbitrary shell."""
+        from hobees.core import container_prep
+
+        if body.action not in container_prep.ALLOWED_ACTIONS:
+            raise HTTPException(
+                400, f"action must be one of {', '.join(container_prep.ALLOWED_ACTIONS)}"
+            )
+        command = container_prep.compose_command(
+            body.action,
+            service=body.service,
+            detach=body.detach,
+            tail=body.tail,
+        )
+        try:
+            output = container_prep.run_compose(
+                body.action,
+                container_prep.project_root(),
+                service=body.service,
+                detach=body.detach,
+                tail=body.tail,
+            )
+        except ValueError as exc:
+            return ContainerActionResponse(success=False, command=command, output="", detail=str(exc))
+        except subprocess.TimeoutExpired:
+            return ContainerActionResponse(
+                success=False, command=command, output="", detail="docker compose timed out"
+            )
+        except Exception as exc:
+            return ContainerActionResponse(success=False, command=command, output="", detail=str(exc))
+        return ContainerActionResponse(success=True, command=command, output=output)
+
 
     # --- Providers ---
 

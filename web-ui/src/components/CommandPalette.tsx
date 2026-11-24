@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import {
   Bot,
+  Container,
   Database,
   FileCode2,
   GitBranch,
@@ -92,6 +93,14 @@ export function CommandPalette() {
         category: 'Studio',
         icon: <FileCode2 className="h-4 w-4 text-zinc-500" />,
         run: () => navigate('/studio?mode=yaml'),
+      },
+      {
+        id: 'containers',
+        label: 'Container preparation (compose & Dockerfile)',
+        cli: 'hobees web',
+        category: 'Studio',
+        icon: <Container className="h-4 w-4 text-zinc-500" />,
+        run: () => navigate('/studio?tab=containers'),
       },
       {
         id: 'traces',

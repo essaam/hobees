@@ -11,6 +11,52 @@ export interface ContainerListResponse {
   containers: string[];
 }
 
+export interface ContainerSpec {
+  project: string;
+  service: string;
+  image: string;
+  container_name: string;
+  base_image: string;
+  working_dir: string;
+  user: string;
+  entrypoint: string[];
+  command: string[];
+  profiles: string[];
+  restart: string;
+  ports: string[];
+  volumes: string[];
+  env: Record<string, string>;
+  api_key_envs: string[];
+  include_db: boolean;
+  db_image: string;
+  db_volume: string;
+}
+
+export interface ContainerPlanResponse {
+  spec: ContainerSpec;
+  compose: string;
+  dockerfile: string;
+  warnings: string[];
+  docker_available: boolean;
+  project_dir: string;
+  compose_exists: boolean;
+  dockerfile_exists: boolean;
+}
+
+export interface ContainerSaveResponse {
+  success: boolean;
+  saved: string[];
+  warnings: string[];
+  project_dir: string;
+}
+
+export interface ContainerActionResponse {
+  success: boolean;
+  command: string[];
+  output: string;
+  detail?: string | null;
+}
+
 export interface Provider {
   id: number;
   alias: string;

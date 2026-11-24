@@ -81,6 +81,13 @@ The production Docker image is built with `uv sync --no-dev`, so it does not
 include pytest. Run tests from the development checkout with `uv run pytest`.
 This repository does not define a development Docker image.
 
+The Studio **Containers** tab prepares that deployment from the running settings:
+it generates `compose.yaml` and `Dockerfile`, can save them to the project root
+(`HOBEES_PROJECT_ROOT`, fixed file names) or export them, and can run the
+allowlisted `docker compose up|down|ps|logs` actions. Environment values stay as
+`${NAME}` references, so generated files never contain a key, and the actions are
+blocked in `--read-only` mode or when `docker` is not installed.
+
 Keep `./artifacts` and `./skills` mounted when testing features that write files. On Linux, set `HOBEES_UID` and `HOBEES_GID` in `.env` to match the host user (`id -u`, `id -g`) so bind mounts remain writable.
 
 ## Change Guidelines
@@ -100,7 +107,12 @@ Keep `./artifacts` and `./skills` mounted when testing features that write files
   and the shared Bee handlers warn when it does not, because such a gate can never
   be reached. `hobees approvals`/`/approvals` and the Web UI show pending gates;
   `strict` resolves them by rejection without prompting, by design.
-- Do not alter or delete existing user data, database volumes, or unrelated generated files.
+- Container preparation (Studio Containers tab) generates `compose.yaml` and `Dockerfile`
+  from the live settings/providers. Generated files reference environment variables **by
+  name** (`${NAME}`), never literal secret values, and the web layer runs only allowlisted
+  `docker compose` subcommands (`up`, `down`, `ps`, `logs`) with fixed argv — no shell, no
+  arbitrary arguments. `hobees.core.container_prep.ALLOWED_ACTIONS`, the endpoint check and
+  `tests/test_container_prep.py` must agree.
 
 ## Pull Requests
 

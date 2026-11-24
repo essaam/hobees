@@ -4,6 +4,7 @@ import {
   Bot,
   Check,
   Code2,
+  Container,
   Copy,
   Download,
   Edit3,
@@ -21,6 +22,11 @@ import { useAppContext } from '../context/AppContext';
 import {
   useBees,
   useConfigYaml,
+  useContainerPlan,
+  useContainers,
+  useBuildContainerPlan,
+  useSaveContainerFiles,
+  useRunContainerAction,
   useCreateBee,
   useCreateHive,
   useCreateProvider,
@@ -40,10 +46,10 @@ import {
   useUpdateHive,
   useUpdateProvider,
 } from '../hooks/useApi';
-import type { Bee, Hive, Provider, ProviderModelTestResponse, ToolSchema } from '../types';
+import type { Bee, ContainerSpec, Hive, Provider, ProviderModelTestResponse, ToolSchema } from '../types';
 import { cn, copyText, downloadText } from '../utils/helpers';
 
-type StudioTab = 'hives' | 'bees' | 'providers' | 'skills';
+type StudioTab = 'hives' | 'bees' | 'providers' | 'skills' | 'containers';
 
 export function Studio() {
   const [searchParams, setSearchParams] = useSearchParams();
@@ -51,7 +57,7 @@ export function Studio() {
 
   const initialTab = (searchParams.get('tab') as StudioTab) || 'hives';
   const [tab, setTab] = useState<StudioTab>(
-    ['hives', 'bees', 'providers', 'skills'].includes(initialTab) ? initialTab : 'hives',
+    ['hives', 'bees', 'providers', 'skills', 'containers'].includes(initialTab) ? initialTab : 'hives',
   );
   const [viewMode, setViewMode] = useState<'visual' | 'yaml'>(
     searchParams.get('mode') === 'yaml' ? 'yaml' : 'visual',
@@ -63,6 +69,7 @@ export function Studio() {
   const { data: skills = [] } = useSkills();
   const { data: toolsData } = useTools();
   const tools = toolsData?.tools ?? [];
+  const { data: containerList } = useContainers();
 
   const { data: yamlData, isLoading: yamlLoading, refetch: refetchYaml } = useConfigYaml(
     viewMode === 'yaml',
@@ -96,7 +103,7 @@ export function Studio() {
 
   useEffect(() => {
     const t = searchParams.get('tab') as StudioTab | null;
-    if (t && ['hives', 'bees', 'providers', 'skills'].includes(t)) {
+    if (t && ['hives', 'bees', 'providers', 'skills', 'containers'].includes(t)) {
       setTab(t);
     }
     const mode = searchParams.get('mode');
@@ -152,7 +159,7 @@ export function Studio() {
         <div>
           <h1 className="text-xl font-semibold tracking-tight text-zinc-900">Studio</h1>
           <p className="mt-0.5 text-sm text-zinc-500">
-            Configure Hives, Worker Bees, tool approval gates, Providers, and Skills.
+            Configure Hives, Worker Bees, tool approval gates, Providers, Skills, and Containers.
           </p>
         </div>
 
@@ -264,6 +271,7 @@ export function Studio() {
                   { id: 'bees', label: 'Bees', count: bees.length, icon: Bot },
                   { id: 'providers', label: 'Providers', count: providers.length, icon: Key },
                   { id: 'skills', label: 'Skills', count: skills.length, icon: Sparkles },
+                  { id: 'containers', label: 'Containers', count: containerList?.containers.length ?? 0, icon: Container },
                 ] as const
               ).map((item) => (
                 <button
@@ -347,6 +355,7 @@ export function Studio() {
 
           {/* List Cards */}
           <div className="space-y-2.5">
+            {tab === 'containers' && <ContainersTab readOnly={readOnly} />}
             {tab === 'hives' &&
               (hives.length === 0 ? (
                 <EmptyBox text="No Hives yet. Create one to coordinate specialist Worker Bees." />
@@ -586,6 +595,213 @@ export function Studio() {
             setEditingHive(null);
           }}
         />
+      )}
+    </div>
+  );
+}
+
+function ContainersTab({ readOnly }: { readOnly: boolean }) {
+  const { data: plan, isLoading } = useContainerPlan();
+  const buildPlan = useBuildContainerPlan();
+  const saveFiles = useSaveContainerFiles();
+  const runAction = useRunContainerAction();
+
+  const [fields, setFields] = useState({
+    service: 'hobees',
+    image: 'hobees:local',
+    base_image: 'python:3.12-slim',
+    container_name: '',
+    profiles: 'runtime_only',
+    ports: '8420:8420',
+    volumes: './artifacts:/data/artifacts, ./skills:/data/skills',
+    command: 'web --host 0.0.0.0 --port 8420',
+    include_db: true,
+  });
+  const [compose, setCompose] = useState('');
+  const [dockerfile, setDockerfile] = useState('');
+  const [warnings, setWarnings] = useState<string[]>([]);
+  const [output, setOutput] = useState('');
+
+  useEffect(() => {
+    if (!plan) return;
+    setCompose(plan.compose);
+    setDockerfile(plan.dockerfile);
+    setWarnings(plan.warnings);
+    setFields((prev) => ({
+      ...prev,
+      service: plan.spec.service,
+      image: plan.spec.image,
+      base_image: plan.spec.base_image,
+      container_name: plan.spec.container_name,
+      profiles: plan.spec.profiles.join(', '),
+      ports: plan.spec.ports.join(', '),
+      volumes: plan.spec.volumes.join(', '),
+      command: plan.spec.command.join(' '),
+      include_db: plan.spec.include_db,
+    }));
+  }, [plan]);
+
+  const list = (value: string) => value.split(',').map((item) => item.trim()).filter(Boolean);
+
+  const spec = (): ContainerSpec => ({
+    project: plan?.spec.project ?? 'hobees',
+    service: fields.service,
+    image: fields.image,
+    container_name: fields.container_name,
+    base_image: fields.base_image,
+    working_dir: plan?.spec.working_dir ?? '/app',
+    user: plan?.spec.user ?? '${HOBEES_UID:-1000}:${HOBEES_GID:-1000}',
+    entrypoint: plan?.spec.entrypoint ?? ['hobees'],
+    command: list(fields.command),
+    profiles: list(fields.profiles),
+    restart: plan?.spec.restart ?? 'unless-stopped',
+    ports: list(fields.ports),
+    volumes: list(fields.volumes),
+    env: plan?.spec.env ?? {},
+    api_key_envs: plan?.spec.api_key_envs ?? [],
+    include_db: fields.include_db,
+    db_image: plan?.spec.db_image ?? 'postgres:16-alpine',
+    db_volume: plan?.spec.db_volume ?? 'postgres_data',
+  });
+
+  const preview = async () => {
+    setOutput('');
+    try {
+      const res = await buildPlan.mutateAsync(spec());
+      setCompose(res.compose);
+      setDockerfile(res.dockerfile);
+      setWarnings(res.warnings);
+    } catch (err) {
+      setOutput(err instanceof Error ? err.message : 'Preview failed');
+    }
+  };
+
+  const save = async () => {
+    if (readOnly) return;
+    try {
+      const res = await saveFiles.mutateAsync({ compose, dockerfile });
+      setOutput(`Saved ${res.saved.join(', ')}`);
+      setWarnings(res.warnings);
+    } catch (err) {
+      setOutput(err instanceof Error ? err.message : 'Save failed');
+    }
+  };
+
+  const run = async (action: string) => {
+    if (readOnly) return;
+    try {
+      const res = await runAction.mutateAsync({ action, service: fields.service, detach: action === 'up' });
+      setOutput(res.success ? res.output : res.detail || `docker compose ${action} failed`);
+    } catch (err) {
+      setOutput(err instanceof Error ? err.message : 'Action failed');
+    }
+  };
+
+  if (isLoading || !plan) return <EmptyBox text="Reading the container plan…" />;
+
+  const canRunContainer = !readOnly && plan.docker_available;
+  return (
+    <div className="space-y-3 rounded-xl border border-zinc-200/90 bg-white p-4 shadow-sm">
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <div>
+          <span className="text-sm font-semibold text-zinc-900">{fields.service}</span>
+          <p className="mt-0.5 text-xs text-zinc-500">{plan.project_dir}</p>
+        </div>
+        <span className={cn('rounded-full px-2 py-0.5 text-[11px] font-medium', plan.docker_available ? 'bg-emerald-50 text-emerald-700' : 'bg-rose-50 text-rose-700')}>
+          {plan.docker_available ? 'docker available' : 'docker is not available on this host'}
+        </span>
+      </div>
+
+      <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+        <Field label="Service name">
+          <input value={fields.service} onChange={(e) => setFields((prev) => ({ ...prev, service: e.target.value }))} readOnly={readOnly} className="w-full rounded-lg border border-zinc-200 px-3 py-2 font-mono text-xs" />
+        </Field>
+        <Field label="Image">
+          <input value={fields.image} onChange={(e) => setFields((prev) => ({ ...prev, image: e.target.value }))} readOnly={readOnly} className="w-full rounded-lg border border-zinc-200 px-3 py-2 font-mono text-xs" />
+        </Field>
+        <Field label="Container name">
+          <input value={fields.container_name} onChange={(e) => setFields((prev) => ({ ...prev, container_name: e.target.value }))} readOnly={readOnly} className="w-full rounded-lg border border-zinc-200 px-3 py-2 font-mono text-xs" />
+        </Field>
+        <Field label="Base image">
+          <input value={fields.base_image} onChange={(e) => setFields((prev) => ({ ...prev, base_image: e.target.value }))} readOnly={readOnly} className="w-full rounded-lg border border-zinc-200 px-3 py-2 font-mono text-xs" />
+        </Field>
+        <Field label="Profiles (comma-separated)">
+          <input value={fields.profiles} onChange={(e) => setFields((prev) => ({ ...prev, profiles: e.target.value }))} readOnly={readOnly} className="w-full rounded-lg border border-zinc-200 px-3 py-2 font-mono text-xs" />
+        </Field>
+        <Field label="Ports (comma-separated)">
+          <input value={fields.ports} onChange={(e) => setFields((prev) => ({ ...prev, ports: e.target.value }))} readOnly={readOnly} className="w-full rounded-lg border border-zinc-200 px-3 py-2 font-mono text-xs" />
+        </Field>
+        <Field label="Volumes (host:container, comma-separated)">
+          <input value={fields.volumes} onChange={(e) => setFields((prev) => ({ ...prev, volumes: e.target.value }))} readOnly={readOnly} className="w-full rounded-lg border border-zinc-200 px-3 py-2 font-mono text-xs" />
+        </Field>
+        <Field label="Command">
+          <input value={fields.command} onChange={(e) => setFields((prev) => ({ ...prev, command: e.target.value }))} readOnly={readOnly} className="w-full rounded-lg border border-zinc-200 px-3 py-2 font-mono text-xs" />
+        </Field>
+      </div>
+
+      <label className="flex items-center gap-2 text-xs text-zinc-600">
+        <input type="checkbox" checked={fields.include_db} onChange={(e) => setFields((prev) => ({ ...prev, include_db: e.target.checked }))} disabled={readOnly} />
+        include a Postgres service ({'environment values stay as ${NAME} references, never literal keys'})
+      </label>
+
+      {warnings.length > 0 && (
+        <ul className="space-y-1 rounded-lg border border-amber-200 bg-amber-50/60 p-3 text-xs text-amber-800">
+          {warnings.map((warning) => (
+            <li key={warning}>{warning}</li>
+          ))}
+        </ul>
+      )}
+
+      <div className="grid grid-cols-1 gap-3 lg:grid-cols-2">
+        <Field label="compose.yaml">
+          <textarea value={compose} onChange={(e) => setCompose(e.target.value)} readOnly={readOnly} spellCheck={false} rows={14} className="w-full resize-y rounded-lg border border-zinc-200 bg-zinc-950 p-3 font-mono text-xs leading-relaxed text-zinc-100 focus:outline-none" />
+        </Field>
+        <Field label="Dockerfile">
+          <textarea value={dockerfile} onChange={(e) => setDockerfile(e.target.value)} readOnly={readOnly} spellCheck={false} rows={14} className="w-full resize-y rounded-lg border border-zinc-200 bg-zinc-950 p-3 font-mono text-xs leading-relaxed text-zinc-100 focus:outline-none" />
+        </Field>
+      </div>
+
+      <div className="flex flex-wrap items-center gap-2">
+        <button type="button" disabled={buildPlan.isPending} onClick={preview} className="inline-flex items-center gap-1.5 rounded-lg border border-zinc-200 bg-white px-3 py-1.5 text-xs font-medium text-zinc-700 hover:bg-zinc-50">
+          <Code2 className="h-3.5 w-3.5" />
+          Preview spec
+        </button>
+        <button type="button" disabled={readOnly || saveFiles.isPending} onClick={save} className="inline-flex items-center gap-1.5 rounded-lg bg-zinc-900 px-3 py-1.5 text-xs font-medium text-white hover:bg-zinc-800 disabled:opacity-40">
+          <Upload className="h-3.5 w-3.5" />
+          Save to project
+        </button>
+        <button type="button" onClick={() => downloadText(compose, 'compose.yaml', 'text/yaml')} className="inline-flex items-center gap-1.5 rounded-lg border border-zinc-200 bg-white px-3 py-1.5 text-xs font-medium text-zinc-700 hover:bg-zinc-50">
+          <Download className="h-3.5 w-3.5" />
+          Export compose
+        </button>
+        <button type="button" onClick={() => downloadText(dockerfile, 'Dockerfile', 'text/plain')} className="inline-flex items-center gap-1.5 rounded-lg border border-zinc-200 bg-white px-3 py-1.5 text-xs font-medium text-zinc-700 hover:bg-zinc-50">
+          <Download className="h-3.5 w-3.5" />
+          Export Dockerfile
+        </button>
+      </div>
+
+      <div className="flex flex-wrap items-center gap-2 border-t border-zinc-100 pt-3">
+        {(['up', 'ps', 'logs', 'down'] as const).map((action) => (
+          <button
+            key={action}
+            type="button"
+            disabled={!canRunContainer || runAction.isPending}
+            onClick={() => run(action)}
+            className="inline-flex items-center gap-1.5 rounded-lg border border-zinc-200 bg-white px-3 py-1.5 text-xs font-medium text-zinc-700 hover:bg-zinc-50 disabled:opacity-40"
+          >
+            {runAction.isPending ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : null}
+            {action === 'up' ? 'Start' : action === 'down' ? 'Stop' : action === 'ps' ? 'Status' : 'Logs'}
+          </button>
+        ))}
+        <span className="text-xs text-zinc-500">
+          {readOnly ? 'Container actions are disabled in --read-only mode.' : 'Only allowlisted docker compose subcommands are run.'}
+        </span>
+      </div>
+
+      {output && (
+        <pre className="max-h-64 overflow-y-auto rounded-lg border border-zinc-200 bg-zinc-50 p-3 font-mono text-xs whitespace-pre-wrap text-zinc-700">
+          {output}
+        </pre>
       )}
     </div>
   );

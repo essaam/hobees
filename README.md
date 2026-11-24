@@ -228,12 +228,21 @@ bees:
   - name: coder-bee
     provider: openai
     model: gpt-4o
-    tools: [read_file, write_file, run_shell]
-    require_approval: [write_file, run_shell]
+    tools: [read_file, write_file]
+    require_approval: [write_file]
 ```
 
-- `require_approval` is a JSON column on the `bees` table (`hobees init` adds it to existing databases) and is reconciled by `hobees import` / `hobees init --config`. Declare it in the config file — `hobees bee create` and the interactive `/bee create` do not yet collect it, so the import path is the way to set it today.
-- Every tool listed must also be in the Bee's `tools` list; `hobees import` and the shared Bee handlers warn when it is not.
+- `require_approval` is a JSON column on the `bees` table (`hobees init` adds it to existing databases) and is reconciled by `hobees import` / `hobees init --config`. It can also be set with `hobees bee create --approval write_file`, `hobees bee update --approval write_file`, or the Studio Bee dialog.
+- A gate only fires when three things line up: the tool is in the Bee's `tools` list, that tool is a **registered** tool, and the model actually calls it. `get_tools()` skips unknown names, so a gate on a name that is not in `TOOL_REGISTRY` can never fire — the built-in tools are `read_file`, `write_file`, `list_directory`, `run_python_calc`, `load_skill`, `save_memory`, `recall_memory`. `hobees import` and the shared Bee handlers warn when a gate names a tool that is missing from `tools` or is not registered.
+- `strict` never asks: it rejects the gated call with a policy `ToolMessage`. Only `interactive` (and `pause`) create a pending approval. The Web UI polls pending approvals and shows a **Gate open on this run** card on the Workbench plus the Approvals drawer.
+
+To see a gate fire end to end, create the Bee above (`hobees bee create gate-bee "writes files" "Use write_file when asked." 1 gpt-4o --tool-names write_file --approval write_file`), set the level to `interactive`, and prompt:
+
+```text
+Write the current date to report.txt in the output directory.
+```
+
+The run pauses at `TOOL_APPROVAL_REQUEST`, the run row becomes `awaiting_approval`, and the approval can be resolved from the Workbench card, the drawer, `hobees approvals`, or `POST /api/v1/approvals/{id}/resolve`.
 
 ### Levels
 
@@ -671,6 +680,15 @@ The `./artifacts` bind mount makes run outputs available on the host (worker-cre
 A one-shot container is headless, so the approval default there is `strict`: a gated tool does not run unless the container sets `HOBEES_APPROVAL_MODE=auto` (or `pause`) in `.env` or passes `--approval-mode`. Container identity is `HOBEES_CONTAINER_NAME` if set, otherwise `HOSTNAME` (Docker's 12-char container id), so parallel workers using the same `hobees.yaml` write distinct thread keys — `worker-1:hive:...` vs `worker-2:hive:...` — and each run can be inspected from any other container with `hobees trace --container <name> --thread <id>`.
 
 To load declarative setup, uncomment the optional `./config:/config:ro` mount in `compose.yaml`, set `HOBEES_CONFIG_PATH=/config/hobees.yaml` in `.env`, and place the config file in `./config`. You can instead run a one-time import with `docker compose run --rm hobees init --config /config/hobees.yaml`.
+
+The web UI's **Studio → Containers** tab prepares that deployment from the browser: it builds a
+`compose.yaml` and a `Dockerfile` from the live settings and the registered providers, shows
+validation warnings, and can save the two files to the project root (`HOBEES_PROJECT_ROOT`,
+fixed names) or export them for download. `Start`, `Status`, `Logs` and `Stop` run only the
+allowlisted `docker compose` subcommands (`up`, `down`, `ps`, `logs`) with fixed arguments —
+no shell, no arbitrary args — and they are disabled in `--read-only` mode or when `docker` is
+not installed. Generated files reference environment variables by name (`${OPENAI_API_KEY}`),
+never by value, and the generated Dockerfile runs as a non-root user with `uv sync --no-dev`.
 
 Provider API keys are passed into the runtime container from `.env`; they are not baked into the image. Add any custom API-key environment variables used by your providers to `.env`. The app container runs as the numeric user configured by `HOBEES_UID` and `HOBEES_GID` so it can write to the artifacts and skills bind mounts.
 

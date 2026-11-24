@@ -7,7 +7,11 @@ import type {
   BeeCreate,
   BeeUpdate,
   ConfigYamlResponse,
+  ContainerActionResponse,
   ContainerListResponse,
+  ContainerPlanResponse,
+  ContainerSaveResponse,
+  ContainerSpec,
   Hive,
   HiveCreate,
   HiveUpdate,
@@ -77,6 +81,16 @@ async function request<T>(endpoint: string, options: RequestInit = {}): Promise<
 export const api = {
   getStatus: () => request<StatusResponse>('/status'),
   getContainers: () => request<ContainerListResponse>('/containers'),
+  getContainerPlan: () => request<ContainerPlanResponse>('/containers/plan'),
+  buildContainerPlan: (body: ContainerSpec) =>
+    request<ContainerPlanResponse>('/containers/plan', { method: 'POST', body: JSON.stringify(body) }),
+  saveContainerFiles: (body: { compose: string; dockerfile: string }) =>
+    request<ContainerSaveResponse>('/containers/files', { method: 'POST', body: JSON.stringify(body) }),
+  runContainerAction: (body: { action: string; service?: string; detach?: boolean; tail?: number }) =>
+    request<ContainerActionResponse>('/containers/action', {
+      method: 'POST',
+      body: JSON.stringify(body),
+    }),
 
   getProviders: () => request<Provider[]>('/providers'),
   createProvider: (body: ProviderCreate) =>

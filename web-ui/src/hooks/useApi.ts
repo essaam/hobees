@@ -3,6 +3,7 @@ import { api } from '../api/client';
 import type {
   ApprovalResolveRequest,
   BeeUpdate,
+  ContainerSpec,
   HiveUpdate,
   ProviderModelTestRequest,
   ProviderUpdate,
@@ -22,6 +23,36 @@ export function useContainers() {
     queryKey: ['containers'],
     queryFn: api.getContainers,
     refetchInterval: 15000,
+  });
+}
+
+export function useContainerPlan() {
+  return useQuery({
+    queryKey: ['containers', 'plan'],
+    queryFn: api.getContainerPlan,
+  });
+}
+
+export function useBuildContainerPlan() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (body: ContainerSpec) => api.buildContainerPlan(body),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ['containers', 'plan'] }),
+  });
+}
+
+export function useSaveContainerFiles() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (body: { compose: string; dockerfile: string }) => api.saveContainerFiles(body),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ['containers', 'plan'] }),
+  });
+}
+
+export function useRunContainerAction() {
+  return useMutation({
+    mutationFn: (body: { action: string; service?: string; detach?: boolean; tail?: number }) =>
+      api.runContainerAction(body),
   });
 }
 
