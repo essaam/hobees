@@ -311,3 +311,48 @@ export function useArtifacts(hive?: string) {
     queryFn: () => api.getArtifacts(hive || undefined),
   });
 }
+
+export function useResetPlan(params: { include_artifacts: boolean }) {
+  return useQuery({
+    queryKey: ['reset', 'plan', params.include_artifacts],
+    queryFn: () => api.getResetPlan(params),
+  });
+}
+
+export function useResetSlate() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: api.resetSlate,
+    onSuccess: () => qc.invalidateQueries({ queryKey: ['reset', 'plan'] }),
+  });
+}
+
+export function useTemplates() {
+  return useQuery({ queryKey: ['templates'], queryFn: api.getTemplates });
+}
+
+export function useApplyTemplate() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: api.applyTemplate,
+    onSuccess: () => {
+      // A template writes providers, bees, hives, skills, memory and the assistant,
+      // so every view that reads them has to refresh.
+      for (const key of ['templates', 'providers', 'bees', 'hives', 'skills', 'memories']) {
+        qc.invalidateQueries({ queryKey: [key] });
+      }
+    },
+  });
+}
+
+export function useDetectProviders() {
+  return useMutation({ mutationFn: api.detectProviders });
+}
+
+export function useRegisterDetectedProviders() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: api.registerDetectedProviders,
+    onSuccess: () => qc.invalidateQueries({ queryKey: ['providers'] }),
+  });
+}

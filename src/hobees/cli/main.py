@@ -26,6 +26,7 @@ from hobees.cli.bee_cmd import app as bee_app
 from hobees.cli.hive_cmd import app as hive_app
 from hobees.cli.provider_cmd import app as provider_app
 from hobees.cli.memory_cmd import app as memory_app
+from hobees.cli.reset_cmd import reset_command
 from hobees.cli.skill_cmd import app as skill_app
 from hobees.cli.import_cmd import import_config
 
@@ -46,6 +47,9 @@ app.add_typer(skill_app, name="skill")
 app.command(name="approvals")(approvals_command)
 app.command(name="permissions")(approvals_command)
 app.command(name="import")(import_config)
+# `hobees reset` is headless only: the interactive shell and the TUI do not offer
+# a command that deletes the slate, so it stays out of the slash-command catalog.
+app.command(name="reset")(reset_command)
 
 
 def _approval_session_level(
@@ -116,7 +120,8 @@ def _root(
     if not ctx.resilient_parsing:
         from hobees.config import ensure_database_url, get_default_database_path, settings
 
-        if ensure_database_url():
+        # `reset` must not re-create the env file and database it is about to remove.
+        if ctx.invoked_subcommand != "reset" and ensure_database_url():
             database_path = escape(str(get_default_database_path()))
             console.print(
                 f"{WARN} HOBEES_DATABASE_URL is not set; using local SQLite "
@@ -124,7 +129,7 @@ def _root(
                 "Set HOBEES_DATABASE_URL to use another database."
             )
 
-        if ctx.invoked_subcommand not in ("init", "import") and settings.config_path:
+        if ctx.invoked_subcommand not in ("init", "import", "reset") and settings.config_path:
             _sync_startup_config(settings.config_path)
 
     # If no subcommand was invoked, run the shell
@@ -820,7 +825,7 @@ def serve(
 
 @app.command()
 def web(
-    port: int = typer.Option(8080, "--port", "-p", help="Web UI bind port"),
+    port: int = typer.Option(6543, "--port", "-p", help="Web UI bind port"),
     host: str = typer.Option("127.0.0.1", "--host", "-h", help="Web UI bind host"),
     open_browser: bool = typer.Option(False, "--open", help="Open browser on startup"),
     read_only: bool = typer.Option(False, "--read-only", help="Disable mutating endpoints"),

@@ -11,6 +11,7 @@ from types import SimpleNamespace
 import pytest
 from fastapi.testclient import TestClient
 
+from hobees import config
 from hobees.config import settings
 from hobees.core.tracing import trace_filename
 from hobees.db.models import ApprovalEvent, Base, Bee, LLMProvider, Run, UsageEvent
@@ -561,3 +562,156 @@ def test_memory_and_artifacts_endpoints(web_env):
 
     traversal = client.get("/api/v1/artifacts/content?hive=dev-team&path=../../web_test.db")
     assert traversal.status_code == 403
+
+
+def test_reset_endpoints_preview_and_require_confirmation(web_env, monkeypatch):
+    tmp_path, _ = web_env
+    home = tmp_path / ".hobees"
+    home.mkdir()
+    (home / ".env").write_text("HOBEES_DATABASE_URL=x\n", encoding="utf-8")
+    (home / "sessions").mkdir()
+
+    monkeypatch.setattr(config, "_CONFIG_DIR", home)
+    monkeypatch.setattr(settings, "skills_dir", home / "skills")
+    monkeypatch.setattr(settings, "artifacts_root", home / "artifacts")
+
+    client = TestClient(create_web_app())
+
+    plan = client.get("/api/v1/reset/plan").json()
+    assert [target["path"] for target in plan["targets"]] == [
+        str(home / ".env"),
+        str(home / "sessions"),
+    ]
+    assert plan["notes"], "the test database lives outside the config folder"
+
+    # A reset without the recorded Y(es) answer is refused and nothing is removed.
+    refused = client.post("/api/v1/reset", json={"include_artifacts": False, "confirmed": False})
+    assert refused.status_code == 400
+    assert (home / ".env").exists()
+
+    # A page on another origin cannot wipe the slate through the browser.
+    cross_site = client.post(
+        "/api/v1/reset",
+        json={"include_artifacts": False, "confirmed": True},
+        headers={"Origin": "http://evil.example"},
+    )
+    assert cross_site.status_code == 403
+    assert (home / ".env").exists()
+
+    done = client.post("/api/v1/reset", json={"include_artifacts": True, "confirmed": True})
+    assert done.status_code == 200
+    body = done.json()
+    assert body["success"] and body["removed"] and body["restart_required"]
+    assert not (home / ".env").exists()
+    assert not (home / "sessions").exists()
+
+    # Read-only mode blocks the mutation, so the Studio panel cannot reset there.
+    readonly = TestClient(create_web_app(read_only=True))
+    assert readonly.post("/api/v1/reset", json={"confirmed": True}).status_code == 403
+
+def test_quick_setup_templates_report_collisions_before_applying(web_env, monkeypatch):
+    client = TestClient(create_web_app())
+
+    templates = client.get("/api/v1/templates").json()
+    assert templates
+    research = next(t for t in templates if t["name"] == "research")
+    assert research["counts"] == {
+        "providers": 2,
+        "bees": 2,
+        "hives": 1,
+        "memory": 0,
+        "skills": 0,
+        "assistant": 1,
+    }
+    assert research["conflicts"] == {}
+
+    # Nothing exists yet, so applying needs no confirmation.
+    applied = client.post("/api/v1/templates/apply", json={"template": "research", "confirmed": False})
+    assert applied.status_code == 200
+    body = applied.json()
+    assert body["success"] and all(action["action"] == "create" for action in body["actions"])
+
+    # The same template now collides with what it created: it must be confirmed.
+    conflicts = next(t for t in client.get("/api/v1/templates").json() if t["name"] == "research")["conflicts"]
+    assert conflicts["hives"] == ["research-team"]
+    refused = client.post("/api/v1/templates/apply", json={"template": "research", "confirmed": False})
+    assert refused.status_code == 409
+    assert "research-team" in refused.json()["detail"]
+
+    # skip leaves an entry the user tuned by hand alone; overwrite tramples it.
+    client.put("/api/v1/bees/searcher", json={"role_description": "hand-tuned role"})
+    skipped = client.post(
+        "/api/v1/templates/apply",
+        json={"template": "research", "on_conflict": "skip", "confirmed": True},
+    ).json()
+    assert all(action["action"] == "kept" for action in skipped["actions"])
+    bee = next(b for b in client.get("/api/v1/bees").json() if b["name"] == "searcher")
+    assert bee["role_description"] == "hand-tuned role"
+
+    overwritten = client.post(
+        "/api/v1/templates/apply",
+        json={"template": "research", "on_conflict": "overwrite", "confirmed": True},
+    ).json()
+    assert all(action["action"] == "update" for action in overwritten["actions"])
+    bee = next(b for b in client.get("/api/v1/bees").json() if b["name"] == "searcher")
+    assert bee["role_description"] == "Gathers information and facts on a topic"
+
+    assert client.post("/api/v1/templates/apply", json={"template": "nope", "confirmed": True}).status_code == 404
+    assert client.post(
+        "/api/v1/templates/apply", json={"template": "research", "on_conflict": "bogus", "confirmed": True}
+    ).status_code == 400
+    assert TestClient(create_web_app(read_only=True)).post(
+        "/api/v1/templates/apply", json={"template": "research", "confirmed": True}
+    ).status_code == 403
+
+
+def test_provider_detection_reports_candidates_and_registers_only_picked_ones(web_env, monkeypatch, tmp_path):
+    client = TestClient(create_web_app())
+
+    for key in ("OPENAI_API_KEY", "ANTHROPIC_API_KEY", "GEMINI_API_KEY", "OPENROUTER_API_KEY", "DEEPSEEK_API_KEY"):
+        monkeypatch.delenv(key, raising=False)
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "sk-test")
+    monkeypatch.setattr("hobees.core.provider_detector._port_open", lambda host, port, *a, **kw: port == 11434)
+    monkeypatch.setattr("hobees.core.provider_detector._SENTINEL_FILE", tmp_path / "sentinel")
+
+    detected = client.post("/api/v1/providers/detect").json()
+    assert {c["alias"] for c in detected["candidates"]} == {"deepseek-main", "ollama-local"}
+    assert all(not c["registered"] for c in detected["candidates"])
+    assert detected["first_launch"] is True
+
+    registered = client.post("/api/v1/providers/detect/register", json={"aliases": ["deepseek-main"]}).json()
+    assert registered["success"] and registered["registered"] == ["deepseek-main"]
+    assert [p["alias"] for p in client.get("/api/v1/providers").json()] == ["deepseek-main"]
+
+    # Re-detection flags it as registered, and a second register keeps the existing row.
+    again = client.post("/api/v1/providers/detect").json()
+    assert {c["alias"]: c["registered"] for c in again["candidates"]}["deepseek-main"] is True
+    second = client.post("/api/v1/providers/detect/register", json={"aliases": ["deepseek-main"]}).json()
+    assert second["registered"] == [] and second["skipped"] == ["deepseek-main"]
+
+    assert client.post("/api/v1/providers/detect/register", json={"aliases": ["not-a-candidate"]}).status_code == 400
+    assert TestClient(create_web_app(read_only=True)).post("/api/v1/providers/detect").status_code == 403
+
+def test_reset_deletes_a_database_file_inside_the_config_folder(web_env, monkeypatch):
+    """The default hobees.db must be on the plan even when the env file holds no URL,
+    and the engine pool is released before the file is removed."""
+    tmp_path, _ = web_env
+    home = tmp_path / ".hobees"
+    home.mkdir()
+    db_file = home / "hobees.db"
+    db_file.write_text("db\n", encoding="utf-8")
+    (home / ".env").write_text("# no HOBEES_DATABASE_URL here\n", encoding="utf-8")
+
+    monkeypatch.setattr(config, "_CONFIG_DIR", home)
+    monkeypatch.setattr(settings, "database_url", None)
+    monkeypatch.setattr(settings, "skills_dir", home / "skills")
+    monkeypatch.setattr(settings, "artifacts_root", home / "artifacts")
+
+    client = TestClient(create_web_app())
+    plan = client.get("/api/v1/reset/plan").json()
+    assert str(db_file) in [target["path"] for target in plan["targets"]]
+
+    removed = client.post("/api/v1/reset", json={"confirmed": True}).json()
+    assert removed["success"] and str(db_file) in removed["removed"]
+    assert not db_file.exists()
+    assert removed["restart_required"]

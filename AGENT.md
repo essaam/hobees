@@ -113,6 +113,21 @@ Keep `./artifacts` and `./skills` mounted when testing features that write files
   `docker compose` subcommands (`up`, `down`, `ps`, `logs`) with fixed argv — no shell, no
   arbitrary arguments. `hobees.core.container_prep.ALLOWED_ACTIONS`, the endpoint check and
   `tests/test_container_prep.py` must agree.
+- An import writes by name, so `hobees import` and the Studio templates panel share
+  `cli/import_cmd.CONFLICT_MODES` (`skip` | `overwrite`): `analyze_config_conflicts()` is
+  the single source for what already exists, `overwrite` stays the CLI default, the web
+  panel defaults to `skip`, and a colliding template is applied only after the user
+  confirms. A skipped hive or skill keeps its roster and assignments too, since those are
+  part of the entry.
+- Reset (`hobees reset`, Studio Quick setup tab) deletes only the paths it planned: the config
+  files inside `~/.hobees`, plus the skills/artifacts roots for `--all`. Confirmation is
+  required on both surfaces — the CLI needs a `Y (yes)` answer and the API rejects an
+  unconfirmed request — so `hobees.core.reset.allowed_roots()`, the plan builder and
+  `tests/test_reset.py` must agree. `apply_plan()` releases the engine pool before it
+  deletes, so a reset running inside a process that opened the database can remove
+  `hobees.db` on Windows; a handle held by another process is reported, never forced.
+  `reset` stays out of the slash-command catalog
+  because the interactive shell and the TUI do not offer it.
 
 ## Pull Requests
 

@@ -8,6 +8,8 @@
 
 _Hobees makes Bee and Hive workflows usable as repeatable command-line jobs, including in short-lived containers, while keeping an interactive shell and TUI available._ The name is inspired by honey bees. PostgreSQL is recommended for multi-process use, while SQLite is supported for local use.
 
+**Web app:** `hobees web` serves the bundled React SPA on `http://127.0.0.1:6543` — Workbench, Studio, Runs & Traces and Memory & Artifacts: live run streams over SSE, HITL approvals you can resolve in the browser, on-demand provider detection, Quick setup templates and Reset. No Node runtime is needed, the built bundle ships inside the package. Details: [Web App](#-web-app).
+
 ## Why `hobees`?
 
 Most multi-agent frameworks force you to write glue code to wire agents together, and then break down when you try to move from a local prototype to a reproducible pipeline. `hobees` treats agent teams as **portable, repeatable configuration**:
@@ -34,6 +36,9 @@ uv run hobees
 hobees # CLI
 hobees --tui
 hobees -p "Summarize this directory"
+
+# Or the web app on http://127.0.0.1:6543
+hobees web --open
 ```
 
 ### Zero-Config Onboarding
@@ -57,7 +62,7 @@ hobees hive run dev-team "Review the changes in src/ and suggest improvements"
 
 On **first launch with no providers configured**, hobees automatically scans your environment for available providers and offers to register them in one step:
 
-- Cloud: checks `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, `GEMINI_API_KEY`, `OPENROUTER_API_KEY`
+- Cloud: checks `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, `GEMINI_API_KEY`, `OPENROUTER_API_KEY`, `DEEPSEEK_API_KEY`
 - Local: probes `localhost:11434` (Ollama), `localhost:8080` (llama-server), `localhost:1234` (LM Studio)
 
 The scan runs once and writes `~/.hobees/.detected` so it never fires again on subsequent launches.
@@ -97,6 +102,7 @@ hobees run --hive dev-team --json "Add feature x to y"
 - [Approval Gates (HITL)](#-approval-gates-hitl)
 - [Interactive Shell](#interactive-shell)
 - [CLI Commands](#cli-commands)
+- [Web App](#-web-app)
 - [Container-Aware Thread IDs & Trace Inspection](#-container-aware-thread-ids--trace-inspection)
 - [Configuration](#configuration)
 - [Docker Compose](#docker-compose)
@@ -234,7 +240,7 @@ bees:
 
 - `require_approval` is a JSON column on the `bees` table (`hobees init` adds it to existing databases) and is reconciled by `hobees import` / `hobees init --config`. It can also be set with `hobees bee create --approval write_file`, `hobees bee update --approval write_file`, or the Studio Bee dialog.
 - A gate only fires when three things line up: the tool is in the Bee's `tools` list, that tool is a **registered** tool, and the model actually calls it. `get_tools()` skips unknown names, so a gate on a name that is not in `TOOL_REGISTRY` can never fire — the built-in tools are `read_file`, `write_file`, `list_directory`, `run_python_calc`, `load_skill`, `save_memory`, `recall_memory`. `hobees import` and the shared Bee handlers warn when a gate names a tool that is missing from `tools` or is not registered.
-- `strict` never asks: it rejects the gated call with a policy `ToolMessage`. Only `interactive` (and `pause`) create a pending approval. The Web UI polls pending approvals and shows a **Gate open on this run** card on the Workbench plus the Approvals drawer.
+- `strict` never asks: it rejects the gated call with a policy `ToolMessage`. Only `interactive` (and `pause`) create a pending approval. The Web UI polls pending approvals and shows a **Gate open on this run** card on the Workbench plus the Approvals drawer ([Web App](#-web-app)).
 
 To see a gate fire end to end, create the Bee above (`hobees bee create gate-bee "writes files" "Use write_file when asked." 1 gpt-4o --tool-names write_file --approval write_file`), set the level to `interactive`, and prompt:
 
@@ -470,15 +476,84 @@ hobees skill list
 hobees skill create --name rust-async-patterns --description "Research Rust async patterns" --from-file ./skill.md
 hobees skill assign rust-async-patterns researcher
 
+# Import with collisions handled explicitly (an import writes by name)
+hobees import ./hobees.yaml                      # updates entries that already exist
+hobees import ./hobees.yaml --on-conflict skip   # keeps existing entries as they are
+hobees import ./hobees.yaml --dry-run            # lists what exists before anything is written
+
 # Single-shot execution
 hobees -p "summarize the latest docs"
 
 # Local API server
 hobees serve --port 8420
 
+# Web UI (Workbench, Studio & Trace Explorer) — default port 6543
+hobees web                       # http://127.0.0.1:6543
+hobees web --open --read-only    # same port, mutating endpoints disabled
+
 # Usage summary
 hobees stats --window 24h --group-by hive
+
+# Clean the slate (headless CLI only; the interactive shell and TUI do not offer it)
+hobees reset                     # env file, databases and config files inside ~/.hobees
+hobees reset --all               # same, plus artifacts, skills and the scratchpad cache
 ```
+
+### Reset the slate
+
+`hobees reset` starts hobees over. It lists what exists and asks for a `Y (yes)`
+answer before deleting anything — any other answer, or no answer at all, cancels
+and nothing is removed. It is headless-only: the interactive shell and the TUI do
+not carry a reset command, and the Web UI exposes the same two scopes on the
+Studio **Quick setup** tab ([Web App](#-web-app)), where the action stays disabled in
+`--read-only` mode and the endpoint only accepts requests from the origin it serves.
+
+| Scope              | What is removed                                                                                                   |
+| ------------------ | ----------------------------------------------------------------------------------------------------------------- |
+| `hobees reset`     | `~/.hobees/.env`, `~/.hobees/.detected`, the SQLite database files (and sidecars) inside `~/.hobees`, `~/.hobees/sessions/` |
+| `hobees reset --all` | the above, plus `~/.hobees/artifacts`, `~/.hobees/scratchpad`, the skills library and `HOBEES_ARTIFACTS_ROOT` |
+
+Nothing outside those paths is touched: environment variables exported in your
+shell keep their values, a project `.env` you created yourself is left alone, and a
+database served outside `~/.hobees` (e.g. PostgreSQL) loses only the URL stored in
+the env file — its rows stay on the server.
+
+The database file is always on the plan: when `HOBEES_DATABASE_URL` is not configured
+(for example right after a previous reset), `~/.hobees/hobees.db` is taken as the target
+through the default path, not skipped. A running process can still hold that file open —
+Windows refuses to delete a file with an active handle — so `apply_plan()` releases the
+SQLAlchemy pool before deleting, which is why the Studio panel and a reset run by its own
+process succeed. If a *different* process (a running web app, an open shell, a
+second terminal) holds it, reset does not force anything: it reports that path as failed
+and tells you to close that process and run again.
+
+After a reset the next launch rebuilds the slate: provider detection runs again, the
+default env file and database are recreated, and `hobees init` ensures the schema. A
+running web app needs a restart so the env file and schema are rebuilt too.
+
+## 🖥 Web App
+
+```bash
+hobees web                      # http://127.0.0.1:6543 (default port)
+hobees web --open --read-only   # mutating endpoints disabled
+```
+
+One FastAPI process serves the bundled SPA (no Node runtime) and `/api/v1`.
+
+| View | What it is for |
+| --- | --- |
+| **Workbench** | provider/model/target pickers, run a goal, live activity feed over SSE; a gate that opens on the watched run shows Approve / Edit / Reject inline |
+| **Studio** | **Quick setup** (templates + Reset), Hives, Bees, Providers, Skills, Containers; visual editor or a `hobees.yaml` round-trip |
+| **Runs & Traces** | container-keyed thread list, trace detail, checkpoint replay |
+| **Memory & Artifacts** | scoped memory browsing, artifacts and download |
+| **Approvals (HITL)** | pending gates from `GET /api/v1/approvals`, resolved with `POST /api/v1/approvals/{id}/resolve` or the Workbench card / drawer — same levels, precedence and audit trail as `hobees approvals` and the shell `/approvals` |
+
+Studio extras:
+
+- **Quick setup** — templates on top, **Reset** below (Reset appears only on this tab). Opening Studio without `?tab=` lands there while nothing is configured, otherwise on Hives. A template lists what it creates and every name it collides with; `Skip existing` is the default, and a colliding template needs a typed `Y (yes)` before `POST /api/v1/templates/apply` runs. `GET /api/v1/templates` reports the plan and collisions.
+- **Detect providers** (Providers tab) — scans env keys (`OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, `GEMINI_API_KEY`, `OPENROUTER_API_KEY`, `DEEPSEEK_API_KEY`) and probes `11434` (Ollama), `8080` (llama-server), `1234` (LM Studio); you then register only the candidates you tick. Detection itself writes nothing.
+
+Read-only mode blocks every mutating call, destructive actions require a typed `Y (yes)`, and reset accepts requests from the origin it serves. `hobees reset` from a terminal is the same two scopes (`~/.hobees` config + `--all` for generated output).
 
 ---
 

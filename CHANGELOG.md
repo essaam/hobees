@@ -18,6 +18,51 @@ to a heading matching that version and add the release date.
   row when not read-only) and `POST /api/v1/providers/test` (config + one minimal
   completion, reasons reported inline); `POST /api/v1/runs` accepts `model` and
   rejects an assistant run with no model instead of guessing one.
+- CLI: `hobees reset` cleans the hobees slate — the env file, the SQLite database
+  files and the config folders hobees created inside `~/.hobees` — and
+  `hobees reset --all` additionally removes the generated output (artifacts, skills
+  library, scratchpad cache). It lists what exists, always asks for a `Y (yes)` answer
+  before deleting, and is headless-only: the interactive shell and the TUI do not offer
+  it. Environment variables exported in the shell are never changed, a project `.env`
+  you created is left alone, and a database served outside `~/.hobees` loses only the
+  URL stored in the env file. The Studio page carries the same two scopes under the new
+  **Quick setup** tab: `GET /api/v1/reset/plan` previews, `POST /api/v1/reset` applies
+  only when the panel recorded a `Y (yes)` confirmation, requests from another origin are
+  rejected, and both are blocked in `--read-only` mode. Reset is labelled **Reset** and is
+  shown only on that tab.
+- Web UI: Studio's **Quick setup** tab puts the built-in templates on top, above Reset.
+  Each card lists what the blueprint creates and every name it already finds in the
+  database, and a colliding template is applied only after a typed `Y (yes)` confirmation,
+  whichever mode is chosen. **Skip existing** is the default so current work is left
+  untouched; **Overwrite existing** is available once confirmed. Endpoints:
+  `GET /api/v1/templates`, `POST /api/v1/templates/apply`.
+- Web UI: the **Providers** tab has a **Detect providers** action — scan env vars and the
+  local ports on demand, see the candidates with their source, then register only the ones
+  you tick. Detection itself writes nothing (`POST /api/v1/providers/detect`), and it and
+  `POST /api/v1/providers/detect/register` are disabled in `--read-only` mode.
+- Core/CLI: `hobees import` accepts `--on-conflict skip | overwrite` (default `overwrite`,
+  what an import always did) and the summary plus the confirmation now name every
+  collision before anything is written; the CLI and the web template panel share one
+  conflict analysis (`analyze_config_conflicts()`). A skipped hive or skill keeps its bee
+  roster and assignments too.
+- Core: detection defaults now include **DeepSeek** (`DEEPSEEK_API_KEY`,
+  `https://api.deepseek.com/v1`).
+
+### Changed
+
+- CLI: the Web UI default port is now **6543** (`hobees web` without `--port`, and the
+  `web-ui` dev-server proxy target follows it). `hobees serve` stays on 8420, and port
+  8080 is still the llama-server detection default — the two are unrelated.
+
+### Fixed
+
+- Reset: `hobees.db` is now actually removed. `configured_database_file()` falls back to
+  the default `~/.hobees/hobees.db` when the env file carries no `HOBEES_DATABASE_URL`
+  (the state a previous reset leaves behind), and `apply_plan()` releases the SQLAlchemy
+  engine pool before deleting, so the Studio panel and any in-process reset no longer
+  fail with `WinError 32` on Windows. A file held open by another process is still
+  reported rather than forced, and the CLI now names the paths left behind instead of
+  claiming the slate is clean.
 
 ### Fixed
 

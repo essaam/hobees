@@ -19,16 +19,24 @@ import type {
   MemoryListResponse,
   Provider,
   ProviderCreate,
+  ProviderDetectionResponse,
   ProviderModelTestRequest,
   ProviderModelTestResponse,
   ProviderModelsResponse,
+  ProviderRegisterResponse,
   ProviderUpdate,
   ReplayRequest,
   ReplayResponse,
+  ResetPlanResponse,
+  ResetRequest,
+  ResetResponse,
   RunCreate,
   RunResponse,
   Skill,
   StatusResponse,
+  TemplateApplyRequest,
+  TemplateApplyResponse,
+  TemplateItem,
   ToolsResponse,
   TraceDetail,
   TraceSummary,
@@ -128,6 +136,15 @@ export const api = {
       body: JSON.stringify(body),
     }),
 
+  detectProviders: () =>
+    request<ProviderDetectionResponse>('/providers/detect', { method: 'POST' }),
+
+  registerDetectedProviders: (aliases: string[]) =>
+    request<ProviderRegisterResponse>('/providers/detect/register', {
+      method: 'POST',
+      body: JSON.stringify({ aliases }),
+    }),
+
   getBees: () => request<Bee[]>('/bees'),
   createBee: (body: BeeCreate) =>
     request<Bee>('/bees', { method: 'POST', body: JSON.stringify(body) }),
@@ -169,6 +186,13 @@ export const api = {
       method: 'POST',
       headers: { 'Content-Type': 'text/plain' },
       body: yaml,
+    }),
+
+  getTemplates: () => request<TemplateItem[]>('/templates'),
+  applyTemplate: (body: TemplateApplyRequest) =>
+    request<TemplateApplyResponse>('/templates/apply', {
+      method: 'POST',
+      body: JSON.stringify(body),
     }),
 
   createRun: (body: RunCreate) =>
@@ -250,4 +274,14 @@ export const api = {
     if (!res.ok) throw new ApiError(res.status, 'Failed to load artifact');
     return res.text();
   },
+
+  getResetPlan: (params: { include_artifacts: boolean }) => {
+    const sp = new URLSearchParams();
+    if (params.include_artifacts) sp.set('include_artifacts', 'true');
+    const qs = sp.toString();
+    return request<ResetPlanResponse>(`/reset/plan${qs ? `?${qs}` : ''}`);
+  },
+
+  resetSlate: (body: ResetRequest) =>
+    request<ResetResponse>('/reset', { method: 'POST', body: JSON.stringify(body) }),
 };

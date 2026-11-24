@@ -7,6 +7,7 @@ import {
   FileCode2,
   GitBranch,
   Key,
+  Layers,
   Play,
   Search,
   Sparkles,
@@ -85,6 +86,14 @@ export function CommandPalette() {
           });
         },
         mutating: true,
+      },
+      {
+        id: 'quick-setup',
+        label: 'Quick setup (templates & reset)',
+        cli: 'hobees init --template <name> | hobees reset',
+        category: 'Studio',
+        icon: <Layers className="h-4 w-4 text-zinc-500" />,
+        run: () => navigate('/studio?tab=setup'),
       },
       {
         id: 'yaml-config',

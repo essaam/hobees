@@ -10,7 +10,8 @@ the user-visible behaviours in place:
 * the Workbench output box scrolls,
 * the Command Palette handles arrow keys from any focus position and no longer
   advertises that legend in its footer,
-* the Studio view is labelled Studio.
+* the Studio view is labelled Studio and its reset panel asks for a typed Y(es)
+  before removing the slate.
 """
 
 from __future__ import annotations
@@ -65,7 +66,7 @@ def test_command_palette_handles_arrow_keys_from_any_focus():
 
 def test_studio_has_a_containers_tab_wired_to_the_api():
     studio = read("pages/Studio.tsx")
-    assert "type StudioTab = 'hives' | 'bees' | 'providers' | 'skills' | 'containers'" in studio
+    assert "type StudioTab = 'setup' | 'hives' | 'bees' | 'providers' | 'skills' | 'containers'" in studio
     assert "ContainersTab" in studio
     assert "useContainerPlan" in studio
     assert "useSaveContainerFiles" in studio
@@ -196,3 +197,71 @@ def test_assistant_run_sends_the_selected_model():
     assert "workbenchModels" in workbench
     assert "Boolean(assistantModel)" in workbench
 
+
+def test_studio_reset_panel_confirms_before_cleaning_the_slate():
+    studio = read("pages/Studio.tsx")
+
+    # The panel shows the plan, the --all scope is opt-in, and the action is gated
+    # on a typed Y(es) so a stray click cannot clear the slate.
+    assert "ResetPanel" in studio
+    assert "<ResetPanel readOnly={readOnly} />" in studio
+    assert "useResetPlan({ include_artifacts: includeArtifacts })" in studio
+    assert "['y', 'yes'].includes(answer.trim().toLowerCase())" in studio
+    assert "Type Y (yes) to confirm" in studio
+    assert "disabled={!confirmed || resetSlate.isPending}" in studio
+    assert "Read-only mode: reset is disabled" in studio
+
+    client = read("api/client.ts")
+    assert "getResetPlan" in client and "resetSlate" in client
+
+    hooks = read("hooks/useApi.ts")
+    assert "useResetPlan" in hooks and "useResetSlate" in hooks
+    assert "queryKey: ['reset', 'plan'" in hooks
+
+    types = read("types/index.ts")
+    assert "ResetPlanResponse" in types and "ResetResponse" in types
+
+def test_quick_setup_tab_carries_templates_and_only_reset():
+    studio = read("pages/Studio.tsx")
+
+    # Quick setup is its own tab; templates sit on top of it and Reset below.
+    assert "type StudioTab = 'setup' | 'hives'" in studio
+    assert "{ id: 'setup', label: 'Quick setup', count: templates.length, icon: Layers }" in studio
+    # Landing tab: Quick setup only when the slate is still empty, otherwise Hives.
+    assert "const STUDIO_TABS: StudioTab[] = ['setup', 'hives', 'bees', 'providers', 'skills', 'containers']" in studio
+    assert "defaultTabResolved" in studio
+    assert "if (providers.length + bees.length + hives.length > 0) setTab('hives');" in studio
+    assert "{tab === 'setup' && <QuickSetupTab readOnly={readOnly} />}" in studio
+    assert "<TemplatesPanel readOnly={readOnly} />" in studio
+    assert "<ResetPanel readOnly={readOnly} />" in studio
+    # Reset is rendered in exactly one place — inside Quick setup — and is labelled Reset.
+    assert studio.count("<ResetPanel readOnly={readOnly} />") == 1
+    assert ">Reset</h2>" in studio
+    assert "function QuickSetupTab" in studio
+
+    # A colliding blueprint is applied only after a typed Y (yes), in either mode,
+    # and skip is the default so existing entries are kept as they are.
+    assert "'skip' | 'overwrite'" in studio
+    assert "collides:" in studio
+    assert "if (needsConfirm && !confirmed) return;" in studio
+    assert "{tab === 'providers' && <ProviderDetectionPanel readOnly={readOnly} />}" in studio
+
+    palette = read("components/CommandPalette.tsx")
+    assert "quick-setup" in palette
+
+    client = read("api/client.ts")
+    for name in ("getTemplates", "applyTemplate", "detectProviders", "registerDetectedProviders"):
+        assert name in client
+
+    hooks = read("hooks/useApi.ts")
+    for name in ("useTemplates", "useApplyTemplate", "useDetectProviders", "useRegisterDetectedProviders"):
+        assert name in hooks
+
+    types = read("types/index.ts")
+    for name in ("TemplateItem", "TemplateApplyRequest", "DetectedProvider", "ProviderDetectionResponse"):
+        assert name in types
+def test_dev_server_proxy_matches_the_web_ui_default_port():
+    """The SPA dev server must proxy to the same port `hobees web` binds by default."""
+    vite = Path(__file__).resolve().parents[1] / "web-ui" / "vite.config.ts"
+    text = vite.read_text(encoding="utf-8")
+    assert "http://127.0.0.1:6543" in text

@@ -396,3 +396,81 @@ export interface ArtifactListResponse {
   artifacts: ArtifactItem[];
   hives: string[];
 }
+
+export interface ResetTarget {
+  path: string;
+  kind: 'file' | 'directory';
+  group: 'config' | 'output';
+  label: string;
+  entries: number;
+  size: number;
+}
+
+export interface ResetPlanResponse {
+  config_dir: string;
+  include_artifacts: boolean;
+  targets: ResetTarget[];
+  notes: string[];
+}
+
+export interface ResetRequest {
+  include_artifacts: boolean;
+  confirmed: boolean;
+}
+
+export interface ResetResponse {
+  success: boolean;
+  removed: string[];
+  failed: string[];
+  notes: string[];
+  restart_required: boolean;
+}
+
+export interface TemplateItem {
+  name: string;
+  description: string;
+  yaml: string;
+  counts: Record<string, number>;
+  conflicts: Record<string, string[]>;
+}
+
+export interface TemplateAction {
+  section: string;
+  name: string;
+  action: 'create' | 'update' | 'kept';
+}
+
+export interface TemplateApplyRequest {
+  template: string;
+  on_conflict: 'skip' | 'overwrite';
+  confirmed: boolean;
+}
+
+export interface TemplateApplyResponse {
+  success: boolean;
+  template: string;
+  on_conflict: string;
+  actions: TemplateAction[];
+  detail?: string;
+}
+
+export interface DetectedProvider {
+  alias: string;
+  provider_type: string;
+  api_key_env: string;
+  base_url: string | null;
+  default_model: string | null;
+  source_label: string;
+  registered: boolean;
+}
+
+export interface ProviderDetectionResponse {
+  candidates: DetectedProvider[];
+  first_launch: boolean;
+}
+
+export interface ProviderRegisterResponse {
+  success: boolean;
+  registered: string[];
+  skipped: string[];
+}

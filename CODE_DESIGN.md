@@ -633,7 +633,8 @@ flowchart TD
 | `core/context_manager.py` | Worker projection, tool truncation, compaction | `project_worker_context()`, `truncate_tool_output()`, `compact_messages()` |
 | `core/memory_manager.py` | Scoped memory CRUD + prompt injection | `upsert_memory()`, `build_memory_block()`, `extract_namespaces()`, `save_memory`, `recall_memory` |
 | `core/skill_harvester.py` | Heuristic-based skill draft extraction for completed Hive runs and Markdown sync | `should_harvest()`, `harvest_completed_run()`, `extract_skill_draft()`, `persist_skill()`, `sync_skills_from_markdown()` |
-| `cli/main.py` | Typer entrypoint, init, stats, serve, prompt, shell | `app` (Typer), `init()`, `stats()`, `serve()`, `prompt()` |
+| `core/reset.py` | Reset scope + plan for the files hobees created inside `~/.hobees` (config scope, `--all` scope) | `build_plan()`, `apply_plan()`, `configured_database_file()`, `ResetPlan`, `ResetTarget`, `ResetResult` |
+| `cli/main.py` | Typer entrypoint, init, stats, serve, prompt, shell, reset | `app` (Typer), `init()`, `stats()`, `serve()`, `prompt()` |
 | `cli/shell.py` | prompt_toolkit REPL with slash-command router | `_shell_loop()` |
 | `cli/icons.py` | Unicode/ASCII icon registry with fallback | `APP`, `BEE`, `HIVE`, `QUEEN`, `SUCCESS`, `WARN`, `ERROR`, `MEMORY`, `SKILL`, `COMPACT`, `THINKING` |
 | `cli/provider_cmd.py` | Provider CRUD + model discovery + interactive picker | `cmd_provider_add()`, `cmd_provider_list()`, `cmd_provider_models()`, `interactive_model_picker()` |
@@ -641,6 +642,8 @@ flowchart TD
 | `cli/hive_cmd.py` | Hive CRUD + membership + thinking level | `cmd_hive_create()`, `cmd_hive_add_bee()`, `cmd_hive_thinking()` |
 | `cli/memory_cmd.py` | Memory CRUD across namespaces | `cmd_memory_list()`, `cmd_memory_add()`, `cmd_memory_forget()`, `cmd_memory_show()` |
 | `cli/skill_cmd.py` | Skill CRUD + assign + Markdown sync | `cmd_skill_list()`, `cmd_skill_create()`, `cmd_skill_save_last()`, `cmd_skill_assign()`, `cmd_skill_sync()` |
+| `cli/import_cmd.py` | Declarative config import (providers → bees → hives → memory → skills → assistant), collision analysis, conflict mode | `import_config()`, `analyze_config_conflicts()`, `collision_text()`, `CONFLICT_MODES` |
+| `cli/reset_cmd.py` | Headless `hobees reset` presentation: plan listing, Y(es) confirmation, removal report | `reset_command()`, `print_plan()`, `_confirm_yes()` |
 | `api/app.py` | FastAPI REST + SSE endpoints | `create_app()` (FastAPI factory) |
 
 ---

@@ -1,4 +1,5 @@
 import asyncio
+import inspect
 import sys
 from types import SimpleNamespace
 from unittest.mock import Mock
@@ -314,3 +315,9 @@ def test_stdin_escape_listener_uses_msvcrt_on_windows(monkeypatch):
     asyncio.run(shell._stdin_escape_listener(cancel_flag))
 
     assert cancel_flag["cancelled"] is True
+
+def test_web_ui_default_port_is_6543():
+    """`hobees web` with no --port binds 6543; Typer defaults are OptionInfo objects."""
+    defaults = dict(zip(inspect.signature(main.web).parameters, main.web.__defaults__))
+    assert defaults["port"].default == 6543
+    assert defaults["host"].default == "127.0.0.1"

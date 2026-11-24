@@ -3,8 +3,8 @@ import json
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
-from hobees.cli.import_cmd import import_config
-from hobees.db.models import Base, Bee, Hive, HiveMembership, LLMProvider
+from hobees.cli.import_cmd import analyze_config_conflicts, import_config
+from hobees.db.models import Base, Bee, Hive, HiveMembership, LLMProvider, Memory
 from hobees.db.session import session_scope
 
 
@@ -74,5 +74,65 @@ def test_config_import_reconciles_existing_resources(tmp_path, monkeypatch):
         assert bee.role_description == "worker A v2"
         assert hive.supervisor_model_name == "model-v2"
         assert member_names == {"sync-worker-b"}
+
+    engine.dispose()
+
+def test_import_reports_collisions_and_can_keep_existing_entries(tmp_path, monkeypatch):
+    engine = create_engine("sqlite://")
+    Base.metadata.create_all(engine)
+    factory = sessionmaker(bind=engine, expire_on_commit=False)
+    monkeypatch.setattr("hobees.db.session.get_session_factory", lambda: factory)
+
+    config = {
+        "providers": [
+            {"alias": "keep-provider", "provider_type": "openai", "api_key_env": "NONE", "default_model": "file-model"}
+        ],
+        "bees": [
+            {"name": "keeper", "provider": "keep-provider", "role_description": "from the file", "model": "file-model"}
+        ],
+        "hives": [
+            {"name": "keeper-hive", "supervisor_provider": "keep-provider", "supervisor_model": "file-model", "bees": ["keeper"]}
+        ],
+        "memory": [{"namespace": "global", "key": "style", "content": "from the file"}],
+    }
+
+    assert analyze_config_conflicts(config) == {}
+
+    config_path = tmp_path / "config.json"
+    config_path.write_text(json.dumps(config), encoding="utf-8")
+    import_config(config_path, force=True)
+
+    # Everything in the file now exists, so a second import is a collision.
+    config["providers"][0]["default_model"] = "new-model"
+    config["bees"][0]["role_description"] = "new text"
+    config["hives"][0]["supervisor_model"] = "new-model"
+    config["memory"][0]["content"] = "new text"
+    conflicts = analyze_config_conflicts(config)
+    assert conflicts == {
+        "providers": ["keep-provider"],
+        "bees": ["keeper"],
+        "hives": ["keeper-hive"],
+        "memory": ["global/style"],
+    }
+
+    config_path.write_text(json.dumps(config), encoding="utf-8")
+    import_config(config_path, force=True, on_conflict="skip")
+
+    with factory() as session:
+        bee = session.query(Bee).filter_by(name="keeper").one()
+        hive = session.query(Hive).filter_by(name="keeper-hive").one()
+        memory = session.query(Memory).filter_by(namespace="global", key="style").one()
+        assert bee.role_description == "from the file"
+        assert hive.supervisor_model_name == "file-model"
+        assert memory.content == "from the file"
+        # The roster is part of the skipped hive, so membership is untouched too.
+        assert {m.bee.name for m in session.query(HiveMembership).filter_by(hive_id=hive.id)} == {"keeper"}
+
+    import_config(config_path, force=True, on_conflict="overwrite")
+
+    with factory() as session:
+        assert session.query(Bee).filter_by(name="keeper").one().role_description == "new text"
+        assert session.query(Hive).filter_by(name="keeper-hive").one().supervisor_model_name == "new-model"
+        assert session.query(Memory).filter_by(namespace="global", key="style").one().content == "new text"
 
     engine.dispose()

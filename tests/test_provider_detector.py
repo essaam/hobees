@@ -7,8 +7,10 @@ import socket
 import pytest
 
 from hobees.core.provider_detector import (
+    _CLOUD_PROVIDERS,
     _port_open,
     detect_available_providers,
+    find_detection_spec,
     is_first_launch,
     mark_detected,
 )
@@ -47,7 +49,8 @@ def test_port_open_returns_false_on_oserror(monkeypatch):
 # detect_available_providers — env-var branch
 # ---------------------------------------------------------------------------
 
-_ALL_CLOUD_KEYS = ("OPENAI_API_KEY", "ANTHROPIC_API_KEY", "GEMINI_API_KEY", "OPENROUTER_API_KEY")
+# Read from the catalogue so a new default can never drift out of the tests.
+_ALL_CLOUD_KEYS = tuple(spec["env_var"] for spec in _CLOUD_PROVIDERS)
 
 
 def _no_ports(monkeypatch):
@@ -209,3 +212,33 @@ def test_env_var_key_not_in_returned_dict(monkeypatch):
     results = detect_available_providers()
     for candidate in results:
         assert "env_var" not in candidate, "Internal 'env_var' key should be stripped"
+
+# ---------------------------------------------------------------------------
+# DeepSeek default
+# ---------------------------------------------------------------------------
+
+
+def test_deepseek_is_a_detection_default(monkeypatch):
+    for key in _ALL_CLOUD_KEYS:
+        monkeypatch.delenv(key, raising=False)
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "sk-test")
+    _no_ports(monkeypatch)
+
+    candidates = {c["alias"]: c for c in detect_available_providers()}
+    assert candidates["deepseek-main"]["base_url"] == "https://api.deepseek.com/v1"
+    assert candidates["deepseek-main"]["api_key_env"] == "DEEPSEEK_API_KEY"
+
+
+def test_find_detection_spec_returns_the_candidate_shape():
+    spec = find_detection_spec("deepseek-main")
+    assert spec and spec["alias"] == "deepseek-main"
+    assert "env_var" not in spec and "host" not in spec and "port" not in spec
+    assert find_detection_spec("not-a-candidate") is None
+
+def test_local_detection_catalog_has_no_strata_entry():
+    """Strata was dropped from the detection defaults on purpose."""
+    from hobees.core.provider_detector import _LOCAL_PROVIDERS
+
+    aliases = {spec["alias"] for spec in _LOCAL_PROVIDERS}
+    assert aliases == {"ollama-local", "llamacpp-local", "lmstudio-local"}
+    assert "strata-local" not in aliases

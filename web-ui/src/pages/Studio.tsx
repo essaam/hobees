@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import { useSearchParams } from 'react-router-dom';
 import {
+  AlertTriangle,
   Bot,
   Check,
   Code2,
@@ -9,9 +10,11 @@ import {
   Download,
   Edit3,
   Key,
+  Layers,
   LayoutGrid,
   Loader2,
   Plus,
+  Search,
   Sparkles,
   Trash2,
   Upload,
@@ -27,6 +30,7 @@ import {
   useBuildContainerPlan,
   useSaveContainerFiles,
   useRunContainerAction,
+  useApplyTemplate,
   useCreateBee,
   useCreateHive,
   useCreateProvider,
@@ -35,41 +39,58 @@ import {
   useDeleteProvider,
   useDeleteSkill,
   useDetectProviderModels,
+  useDetectProviders,
   useHives,
   useImportConfigYaml,
   useProviders,
+  useRegisterDetectedProviders,
+  useResetPlan,
+  useResetSlate,
   useSaveLastSkill,
   useSkills,
+  useTemplates,
   useTestProviderModel,
   useTools,
   useUpdateBee,
   useUpdateHive,
   useUpdateProvider,
 } from '../hooks/useApi';
-import type { Bee, ContainerSpec, Hive, Provider, ProviderModelTestResponse, ToolSchema } from '../types';
-import { cn, copyText, downloadText } from '../utils/helpers';
+import type {
+  Bee,
+  ContainerSpec,
+  DetectedProvider,
+  Hive,
+  Provider,
+  ProviderModelTestResponse,
+  ResetResponse,
+  TemplateAction,
+  TemplateItem,
+  ToolSchema,
+} from '../types';
+import { cn, copyText, downloadText, formatBytes } from '../utils/helpers';
 
-type StudioTab = 'hives' | 'bees' | 'providers' | 'skills' | 'containers';
+type StudioTab = 'setup' | 'hives' | 'bees' | 'providers' | 'skills' | 'containers';
+
+const STUDIO_TABS: StudioTab[] = ['setup', 'hives', 'bees', 'providers', 'skills', 'containers'];
 
 export function Studio() {
   const [searchParams, setSearchParams] = useSearchParams();
   const { readOnly } = useAppContext();
 
-  const initialTab = (searchParams.get('tab') as StudioTab) || 'hives';
-  const [tab, setTab] = useState<StudioTab>(
-    ['hives', 'bees', 'providers', 'skills', 'containers'].includes(initialTab) ? initialTab : 'hives',
-  );
+  const initialTab = (searchParams.get('tab') as StudioTab) || '';
+  const [tab, setTab] = useState<StudioTab>(STUDIO_TABS.includes(initialTab) ? initialTab : 'setup');
   const [viewMode, setViewMode] = useState<'visual' | 'yaml'>(
     searchParams.get('mode') === 'yaml' ? 'yaml' : 'visual',
   );
 
-  const { data: providers = [] } = useProviders();
-  const { data: bees = [] } = useBees();
-  const { data: hives = [] } = useHives();
+  const { data: providers = [], isLoading: providersLoading } = useProviders();
+  const { data: bees = [], isLoading: beesLoading } = useBees();
+  const { data: hives = [], isLoading: hivesLoading } = useHives();
   const { data: skills = [] } = useSkills();
   const { data: toolsData } = useTools();
   const tools = toolsData?.tools ?? [];
   const { data: containerList } = useContainers();
+  const { data: templates = [] } = useTemplates();
 
   const { data: yamlData, isLoading: yamlLoading, refetch: refetchYaml } = useConfigYaml(
     viewMode === 'yaml',
@@ -101,9 +122,30 @@ export function Studio() {
   const [yamlStatus, setYamlStatus] = useState<string | null>(null);
   const [copiedYaml, setCopiedYaml] = useState(false);
 
+  // Quick setup is the landing tab only while the slate is still empty. Once the first
+  // data arrives, an install that already has providers/Bees/Hives lands on Hives as
+  // before, and an explicit ?tab= always wins over this.
+  const [defaultTabResolved, setDefaultTabResolved] = useState(STUDIO_TABS.includes(initialTab));
+
+  useEffect(() => {
+    if (defaultTabResolved || searchParams.get('tab')) return;
+    if (providersLoading || beesLoading || hivesLoading) return;
+    setDefaultTabResolved(true);
+    if (providers.length + bees.length + hives.length > 0) setTab('hives');
+  }, [
+    defaultTabResolved,
+    providers,
+    bees,
+    hives,
+    providersLoading,
+    beesLoading,
+    hivesLoading,
+    searchParams,
+  ]);
+
   useEffect(() => {
     const t = searchParams.get('tab') as StudioTab | null;
-    if (t && ['hives', 'bees', 'providers', 'skills', 'containers'].includes(t)) {
+    if (t && STUDIO_TABS.includes(t)) {
       setTab(t);
     }
     const mode = searchParams.get('mode');
@@ -267,6 +309,7 @@ export function Studio() {
             <div className="inline-flex rounded-lg border border-zinc-200 bg-white p-0.5 text-xs font-medium">
               {(
                 [
+                  { id: 'setup', label: 'Quick setup', count: templates.length, icon: Layers },
                   { id: 'hives', label: 'Hives', count: hives.length, icon: Users },
                   { id: 'bees', label: 'Bees', count: bees.length, icon: Bot },
                   { id: 'providers', label: 'Providers', count: providers.length, icon: Key },
@@ -355,6 +398,8 @@ export function Studio() {
 
           {/* List Cards */}
           <div className="space-y-2.5">
+            {tab === 'setup' && <QuickSetupTab readOnly={readOnly} />}
+            {tab === 'providers' && <ProviderDetectionPanel readOnly={readOnly} />}
             {tab === 'containers' && <ContainersTab readOnly={readOnly} />}
             {tab === 'hives' &&
               (hives.length === 0 ? (
@@ -811,6 +856,572 @@ function EmptyBox({ text }: { text: string }) {
   return (
     <div className="rounded-2xl border border-dashed border-zinc-200 bg-white px-6 py-12 text-center text-sm text-zinc-500">
       {text}
+    </div>
+  );
+}
+
+/** Quick setup: built-in templates on top, Reset below. */
+function QuickSetupTab({ readOnly }: { readOnly: boolean }) {
+  return (
+    <div className="space-y-3">
+      <TemplatesPanel readOnly={readOnly} />
+      <ResetPanel readOnly={readOnly} />
+    </div>
+  );
+}
+
+/** Browser twin of `hobees init --template <name>`.
+ *
+ * The server reports which names a blueprint already finds in the database, so a
+ * collision is visible before applying. `skip` is the default: existing bees, hives,
+ * skills, memories and providers are left exactly as they are. Overwriting is only
+ * possible when the user confirms the collision list with Y (yes).
+ */
+function TemplatesPanel({ readOnly }: { readOnly: boolean }) {
+  const { data: templates = [], isLoading } = useTemplates();
+  const applyTemplate = useApplyTemplate();
+  const [onConflict, setOnConflict] = useState<'skip' | 'overwrite'>('skip');
+  const [confirming, setConfirming] = useState<TemplateItem | null>(null);
+  const [answer, setAnswer] = useState('');
+  const [status, setStatus] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(null);
+
+  const confirmed = ['y', 'yes'].includes(answer.trim().toLowerCase());
+
+  const summarize = (actions: TemplateAction[]) => {
+    const counts: Record<string, number> = {};
+    for (const action of actions) counts[action.action] = (counts[action.action] ?? 0) + 1;
+    return Object.entries(counts)
+      .map(([word, count]) => `${count} ${word}`)
+      .join(', ');
+  };
+
+  const apply = async (template: TemplateItem, needsConfirm: boolean) => {
+    if (readOnly) return;
+    // A blueprint that collides with existing names is only applied after Y(es).
+    if (needsConfirm && !confirmed) return;
+    setError(null);
+    try {
+      const res = await applyTemplate.mutateAsync({
+        template: template.name,
+        on_conflict: onConflict,
+        confirmed: needsConfirm,
+      });
+      setStatus(`Applied ${res.template} (${res.on_conflict}): ${summarize(res.actions)}`);
+      setConfirming(null);
+      setAnswer('');
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Could not apply template');
+    }
+  };
+
+  return (
+    <div className="rounded-2xl border border-zinc-200/90 bg-white p-4 shadow-sm sm:p-5">
+      <div className="flex flex-wrap items-start justify-between gap-3">
+        <div className="min-w-0">
+          <h2 className="text-sm font-semibold text-zinc-900">Templates</h2>
+          <p className="mt-1 max-w-2xl text-xs text-zinc-500">
+            Built-in starter blueprints. Applying one creates its providers, Bees, Hives, skills
+            and assistant. An import writes by name, so a blueprint can reach entries that are
+            already set up — pick what happens to those.
+          </p>
+        </div>
+        <div className="inline-flex rounded-lg border border-zinc-200 bg-white p-0.5 text-xs font-medium">
+          {(['skip', 'overwrite'] as const).map((mode) => (
+            <button
+              key={mode}
+              type="button"
+              onClick={() => setOnConflict(mode)}
+              className={cn(
+                'rounded-md px-3 py-1.5 transition-colors',
+                onConflict === mode ? 'bg-zinc-900 text-white' : 'text-zinc-600 hover:text-zinc-900',
+              )}
+            >
+              {mode === 'skip' ? 'Skip existing' : 'Overwrite existing'}
+            </button>
+          ))}
+        </div>
+      </div>
+
+      {isLoading ? (
+        <p className="mt-3 text-xs text-zinc-400">Loading templates…</p>
+      ) : (
+        <div className="mt-3 space-y-2.5">
+          {templates.map((template) => {
+            const conflicts = template.conflicts ?? {};
+            const collides = Object.keys(conflicts).length > 0;
+            return (
+              <div key={template.name} className="rounded-xl border border-zinc-200/90 bg-white p-3.5">
+                <div className="flex flex-wrap items-start justify-between gap-3">
+                  <div className="min-w-0">
+                    <div className="flex flex-wrap items-center gap-2">
+                      <span className="font-mono text-sm font-semibold text-zinc-900">{template.name}</span>
+                      {collides && (
+                        <span className="rounded-full bg-amber-50 px-2 py-0.5 text-[11px] font-medium text-amber-800">
+                          collides: {Object.keys(conflicts).join(', ')}
+                        </span>
+                      )}
+                    </div>
+                    <p className="mt-1 text-xs text-zinc-500">{template.description}</p>
+                    <div className="mt-1.5 flex flex-wrap gap-x-3 gap-y-1 text-xs text-zinc-400">
+                      {Object.entries(template.counts ?? {}).map(([section, count]) =>
+                        count ? (
+                          <span key={section}>
+                            {count} {section}
+                          </span>
+                        ) : null,
+                      )}
+                    </div>
+                  </div>
+                  <button
+                    type="button"
+                    disabled={readOnly || applyTemplate.isPending}
+                    onClick={() => {
+                      if (collides) {
+                        setAnswer('');
+                        setConfirming(template);
+                      } else {
+                        apply(template, false);
+                      }
+                    }}
+                    className="inline-flex items-center gap-1.5 rounded-lg bg-zinc-900 px-3 py-1.5 text-xs font-medium text-white hover:bg-zinc-800 disabled:opacity-40"
+                  >
+                    {applyTemplate.isPending ? (
+                      <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                    ) : (
+                      <Sparkles className="h-3.5 w-3.5" />
+                    )}
+                    Apply
+                  </button>
+                </div>
+                {collides && (
+                  <div className="mt-2 space-y-0.5 text-xs text-zinc-500">
+                    {Object.entries(conflicts).map(([section, names]) => (
+                      <p key={section}>
+                        existing {section}: <span className="font-mono">{names.join(', ')}</span>
+                      </p>
+                    ))}
+                    <p>
+                      will be {onConflict === 'skip' ? 'kept as they are' : 'updated'} — applying
+                      needs a Y (yes) confirmation
+                    </p>
+                  </div>
+                )}
+              </div>
+            );
+          })}
+        </div>
+      )}
+
+      {status && (
+        <div className="mt-3 rounded-lg border border-emerald-200 bg-emerald-50 px-3 py-2 text-xs text-emerald-700">
+          {status}
+        </div>
+      )}
+      {error && (
+        <div className="mt-3 rounded-lg border border-rose-200 bg-rose-50 px-3 py-2 text-xs text-rose-700">
+          {error}
+        </div>
+      )}
+      {readOnly && (
+        <p className="mt-3 text-xs text-zinc-500">
+          Read-only mode: templates cannot be applied here. Run{' '}
+          <span className="font-mono">hobees init --template &lt;name&gt;</span> in a terminal.
+        </p>
+      )}
+
+      {confirming && (
+        <DialogShell title={`Confirm template: ${confirming.name}`} onClose={() => setConfirming(null)}>
+          <div className="space-y-3 px-5 py-4 text-xs text-zinc-600">
+            <p>
+              This blueprint creates{' '}
+              {Object.values(confirming.counts ?? {}).reduce((sum, count) => sum + count, 0)} entries.
+              {' '}
+              {Object.keys(confirming.conflicts ?? {}).length} of them already exist and will be{' '}
+              <strong>{onConflict === 'skip' ? 'left unchanged' : 'updated'}</strong>.
+            </p>
+            <ul className="space-y-1">
+              {Object.entries(confirming.conflicts ?? {}).map(([section, names]) => (
+                <li key={section}>
+                  <span className="font-medium text-zinc-700">{section}</span>:{' '}
+                  <span className="font-mono">{names.join(', ')}</span>
+                </li>
+              ))}
+            </ul>
+            <label className="flex items-center gap-2">
+              <span className="font-medium text-zinc-700">Type Y (yes) to confirm</span>
+              <input
+                autoFocus
+                value={answer}
+                onChange={(e) => setAnswer(e.target.value)}
+                placeholder="Y"
+                className="w-24 rounded-lg border border-zinc-200 px-2 py-1.5 font-mono focus:outline-none focus:border-zinc-400"
+              />
+            </label>
+            <div className="flex items-center justify-end gap-2">
+              <button
+                type="button"
+                onClick={() => setConfirming(null)}
+                className="rounded-lg border border-zinc-200 px-3 py-1.5 font-medium text-zinc-600 hover:bg-zinc-50"
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                onClick={() => apply(confirming, true)}
+                disabled={!confirmed || applyTemplate.isPending}
+                className="inline-flex items-center gap-1.5 rounded-lg bg-zinc-900 px-3 py-1.5 font-medium text-white hover:bg-zinc-800 disabled:opacity-40"
+              >
+                {applyTemplate.isPending ? (
+                  <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                ) : (
+                  <Check className="h-3.5 w-3.5" />
+                )}
+                Apply
+              </button>
+            </div>
+          </div>
+        </DialogShell>
+      )}
+    </div>
+  );
+}
+
+/** Browser twin of `hobees detect-providers`: env-var and local-port scan on demand.
+ *
+ * Detection itself writes nothing — it reports candidates, the user picks, and only
+ * the picked aliases are registered.
+ */
+function ProviderDetectionPanel({ readOnly }: { readOnly: boolean }) {
+  const detect = useDetectProviders();
+  const register = useRegisterDetectedProviders();
+  const [candidates, setCandidates] = useState<DetectedProvider[]>([]);
+  const [picked, setPicked] = useState<string[]>([]);
+  const [status, setStatus] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(null);
+
+  const run = async () => {
+    if (readOnly) return;
+    setError(null);
+    setStatus(null);
+    try {
+      const res = await detect.mutateAsync();
+      setCandidates(res.candidates);
+      setPicked(res.candidates.filter((candidate) => !candidate.registered).map((candidate) => candidate.alias));
+      setStatus(
+        res.candidates.length === 0
+          ? 'Nothing found: no provider API key in the environment and no local server answered.'
+          : `Found ${res.candidates.length} provider(s)${res.first_launch ? ' (first launch)' : ''}. Pick the ones to register.`,
+      );
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Detection failed');
+    }
+  };
+
+  const registerSelected = async () => {
+    if (readOnly || picked.length === 0) return;
+    setError(null);
+    try {
+      const res = await register.mutateAsync(picked);
+      setStatus(
+        `Registered ${res.registered.length} provider(s)${res.registered.length ? `: ${res.registered.join(', ')}` : ''}` +
+        (res.skipped.length ? ` · already registered, left as is: ${res.skipped.join(', ')}` : ''),
+      );
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Could not register providers');
+    }
+  };
+
+  const toggle = (alias: string) =>
+    setPicked((prev) => (prev.includes(alias) ? prev.filter((item) => item !== alias) : [...prev, alias]));
+
+  return (
+    <div className="rounded-2xl border border-zinc-200/90 bg-white p-4 shadow-sm sm:p-5">
+      <div className="flex flex-wrap items-start justify-between gap-3">
+        <div className="min-w-0">
+          <h2 className="text-sm font-semibold text-zinc-900">Detect providers</h2>
+          <p className="mt-1 max-w-2xl text-xs text-zinc-500">
+            Scans the environment for API keys (OpenAI, Anthropic, Gemini, OpenRouter,
+            DeepSeek) and probes the local server ports (Ollama, llama.cpp, LM Studio).
+            Detection reports candidates only — nothing is saved until you pick them.
+          </p>
+        </div>
+        <button
+          type="button"
+          onClick={run}
+          disabled={readOnly || detect.isPending}
+          className="inline-flex items-center gap-1.5 rounded-lg bg-zinc-900 px-3 py-1.5 text-xs font-medium text-white hover:bg-zinc-800 disabled:opacity-40"
+        >
+          {detect.isPending ? (
+            <Loader2 className="h-3.5 w-3.5 animate-spin" />
+          ) : (
+            <Search className="h-3.5 w-3.5" />
+          )}
+          Run detection
+        </button>
+      </div>
+
+      {candidates.length > 0 ? (
+        <ul className="mt-3 space-y-2">
+          {candidates.map((candidate) => (
+            <li
+              key={candidate.alias}
+              className="flex items-start justify-between gap-3 rounded-xl border border-zinc-200/90 bg-white px-3 py-2.5"
+            >
+              <div className="min-w-0">
+                <div className="flex flex-wrap items-center gap-2">
+                  <span className="font-mono text-sm font-semibold text-zinc-900">{candidate.alias}</span>
+                  {candidate.registered && (
+                    <span className="rounded-full bg-emerald-50 px-2 py-0.5 text-[11px] font-medium text-emerald-700">
+                      already registered
+                    </span>
+                  )}
+                </div>
+                <div className="mt-1 flex flex-wrap gap-x-3 gap-y-1 text-xs text-zinc-500">
+                  <span className="font-mono">{candidate.source_label}</span>
+                  <span>{candidate.provider_type}</span>
+                  <span>key: {candidate.api_key_env}</span>
+                  {candidate.default_model && <span>model: {candidate.default_model}</span>}
+                </div>
+              </div>
+              <input
+                type="checkbox"
+                aria-label={`Register ${candidate.alias}`}
+                checked={picked.includes(candidate.alias)}
+                disabled={readOnly || candidate.registered}
+                onChange={() => toggle(candidate.alias)}
+              />
+            </li>
+          ))}
+        </ul>
+      ) : (
+        <p className="mt-3 text-xs text-zinc-400">
+          {status ?? 'Run detection to see what is available on this machine.'}
+        </p>
+      )}
+
+      {status && candidates.length > 0 && (
+        <div className="mt-3 rounded-lg border border-emerald-200 bg-emerald-50 px-3 py-2 text-xs text-emerald-700">
+          {status}
+        </div>
+      )}
+      {error && (
+        <div className="mt-3 rounded-lg border border-rose-200 bg-rose-50 px-3 py-2 text-xs text-rose-700">
+          {error}
+        </div>
+      )}
+
+      <div className="mt-3 flex flex-wrap items-center gap-3">
+        <button
+          type="button"
+          onClick={registerSelected}
+          disabled={readOnly || picked.length === 0 || register.isPending}
+          className="inline-flex items-center gap-1.5 rounded-lg bg-zinc-900 px-3 py-1.5 text-xs font-medium text-white hover:bg-zinc-800 disabled:opacity-40"
+        >
+          {register.isPending ? (
+            <Loader2 className="h-3.5 w-3.5 animate-spin" />
+          ) : (
+            <Check className="h-3.5 w-3.5" />
+          )}
+          Register {picked.length} selected
+        </button>
+        {readOnly && (
+          <span className="text-xs text-zinc-500">
+            Read-only mode: detection and registration are disabled here. Use{' '}
+            <span className="font-mono">hobees detect-providers</span> in a terminal.
+          </span>
+        )}
+      </div>
+    </div>
+  );
+}
+
+/** Danger zone on the Studio page: the browser twin of `hobees reset`.
+ *
+ * Same two scopes as the headless command — the config files inside ~/.hobees,
+ * plus generated output when **--all** is checked. Nothing is sent unless the user
+ * answers Y(es); the endpoint rejects an unconfirmed request as well, so a stray
+ * click cannot clear the slate.
+ */
+function ResetPanel({ readOnly }: { readOnly: boolean }) {
+  const [includeArtifacts, setIncludeArtifacts] = useState(false);
+  const [confirmOpen, setConfirmOpen] = useState(false);
+  const [answer, setAnswer] = useState('');
+  const [error, setError] = useState<string | null>(null);
+  const [result, setResult] = useState<ResetResponse | null>(null);
+  const { data: plan, isLoading } = useResetPlan({ include_artifacts: includeArtifacts });
+  const resetSlate = useResetSlate();
+
+  const targets = plan?.targets ?? [];
+  const confirmed = ['y', 'yes'].includes(answer.trim().toLowerCase());
+
+  const openConfirm = () => {
+    setAnswer('');
+    setError(null);
+    setConfirmOpen(true);
+  };
+
+  const run = async () => {
+    if (!confirmed || readOnly || resetSlate.isPending) return;
+    setError(null);
+    try {
+      const res = await resetSlate.mutateAsync({
+        include_artifacts: includeArtifacts,
+        confirmed: true,
+      });
+      setResult(res);
+      setConfirmOpen(false);
+      setAnswer('');
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Reset failed');
+    }
+  };
+
+  return (
+    <div className="rounded-2xl border border-zinc-200/90 bg-white p-4 shadow-sm sm:p-5">
+      <div className="flex flex-wrap items-start justify-between gap-3">
+        <div className="min-w-0">
+          <h2 className="text-sm font-semibold text-zinc-900">Reset</h2>
+          <p className="mt-1 max-w-2xl text-xs text-zinc-500">
+            Removes the env file, databases and config files hobees created inside{' '}
+            <span className="font-mono">~/.hobees</span>. Variables you exported in your shell are
+            not changed, and a database served outside that folder is not dropped.
+          </p>
+        </div>
+        <label className="inline-flex cursor-pointer items-center gap-2 text-xs font-medium text-zinc-600">
+          <input
+            type="checkbox"
+            checked={includeArtifacts}
+            onChange={(e) => {
+              setIncludeArtifacts(e.target.checked);
+              setResult(null);
+            }}
+          />
+          Also remove generated output (<span className="font-mono">--all</span>: artifacts, skills,
+          scratchpad)
+        </label>
+      </div>
+
+      {isLoading ? (
+        <p className="mt-3 text-xs text-zinc-400">Checking what exists…</p>
+      ) : targets.length === 0 ? (
+        <p className="mt-3 text-xs text-zinc-500">Nothing to remove — the slate is already clean.</p>
+      ) : (
+        <ul className="mt-3 space-y-1.5 text-xs">
+          {targets.map((target) => (
+            <li key={target.path} className="flex items-start justify-between gap-3">
+              <span className="min-w-0 break-all font-mono text-zinc-600">
+                {target.label}: {target.path}
+              </span>
+              <span className="shrink-0 text-zinc-400">
+                {target.kind === 'directory' ? `${target.entries} file(s), ` : ''}
+                {formatBytes(target.size)}
+              </span>
+            </li>
+          ))}
+        </ul>
+      )}
+
+      {plan?.notes && plan.notes.length > 0 && (
+        <ul className="mt-2 space-y-1 text-xs text-zinc-500">
+          {plan.notes.map((note) => (
+            <li key={note}>{note}</li>
+          ))}
+        </ul>
+      )}
+
+      {error && (
+        <div className="mt-3 rounded-lg border border-rose-200 bg-rose-50 px-3 py-2 text-xs text-rose-700">
+          {error}
+        </div>
+      )}
+
+      {result && (
+        <div className="mt-3 rounded-lg border border-emerald-200 bg-emerald-50 px-3 py-2 text-xs text-emerald-700">
+          <p>{result.removed.length} path(s) removed.</p>
+          {result.failed.length > 0 && (
+            <ul className="mt-1 space-y-1 text-rose-700">
+              {result.failed.map((failure) => (
+                <li key={failure}>{failure}</li>
+              ))}
+            </ul>
+          )}
+          {result.restart_required && (
+            <p className="mt-1 text-zinc-600">
+              Restart the web app, or run <span className="font-mono">hobees init</span>, so the env
+              file and schema are rebuilt.
+            </p>
+          )}
+        </div>
+      )}
+
+      <div className="mt-3 flex flex-wrap items-center gap-3">
+        <button
+          type="button"
+          onClick={openConfirm}
+          disabled={readOnly || targets.length === 0}
+          className="inline-flex items-center gap-1.5 rounded-lg border border-rose-200 bg-rose-50 px-3 py-1.5 text-xs font-medium text-rose-700 hover:bg-rose-100 disabled:opacity-40"
+        >
+          <AlertTriangle className="h-3.5 w-3.5" />
+          Reset
+        </button>
+        {readOnly && (
+          <span className="text-xs text-zinc-500">
+            Read-only mode: reset is disabled. Use <span className="font-mono">hobees reset</span> in
+            a terminal.
+          </span>
+        )}
+      </div>
+
+      {confirmOpen && (
+        <DialogShell title="Confirm reset" onClose={() => setConfirmOpen(false)}>
+          <div className="space-y-3 px-5 py-4 text-xs text-zinc-600">
+            <p>
+              {targets.length} path(s) in {plan?.config_dir ?? '~/.hobees'} will be removed
+              {includeArtifacts ? ', including generated output' : ''}. This cannot be undone.
+            </p>
+            <ul className="max-h-48 space-y-1 overflow-y-auto">
+              {targets.map((target) => (
+                <li key={target.path} className="break-all font-mono text-zinc-500">
+                  {target.path}
+                </li>
+              ))}
+            </ul>
+            <label className="flex items-center gap-2">
+              <span className="font-medium text-zinc-700">Type Y (yes) to confirm</span>
+              <input
+                autoFocus
+                value={answer}
+                onChange={(e) => setAnswer(e.target.value)}
+                placeholder="Y"
+                className="w-24 rounded-lg border border-zinc-200 px-2 py-1.5 font-mono focus:outline-none focus:border-zinc-400"
+              />
+            </label>
+            <div className="flex items-center justify-end gap-2">
+              <button
+                type="button"
+                onClick={() => setConfirmOpen(false)}
+                className="rounded-lg border border-zinc-200 px-3 py-1.5 font-medium text-zinc-600 hover:bg-zinc-50"
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                onClick={run}
+                disabled={!confirmed || resetSlate.isPending}
+                className="inline-flex items-center gap-1.5 rounded-lg bg-rose-600 px-3 py-1.5 font-medium text-white hover:bg-rose-700 disabled:opacity-40"
+              >
+                {resetSlate.isPending ? (
+                  <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                ) : (
+                  <Trash2 className="h-3.5 w-3.5" />
+                )}
+                Reset
+              </button>
+            </div>
+          </div>
+        </DialogShell>
+      )}
     </div>
   );
 }

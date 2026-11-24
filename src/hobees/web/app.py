@@ -18,6 +18,7 @@ import subprocess
 import tempfile
 import time
 import uuid
+from urllib.parse import urlsplit
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Literal, Optional
@@ -435,6 +436,88 @@ class ContainerActionResponse(BaseModel):
     command: list[str]
     output: str
     detail: Optional[str] = None
+
+
+class TemplateItem(BaseModel):
+    name: str
+    description: str
+    yaml: str
+    counts: dict[str, int] = Field(default_factory=dict)
+    conflicts: dict[str, list[str]] = Field(default_factory=dict)
+
+
+class TemplateApplyRequest(BaseModel):
+    template: str
+    on_conflict: str = Field("skip", description="skip | overwrite — what to do with names that already exist")
+    confirmed: bool = Field(False, description="The user confirmed a template that collides")
+
+
+class TemplateAction(BaseModel):
+    section: str
+    name: str
+    action: Literal["create", "update", "kept"]
+
+
+class TemplateApplyResponse(BaseModel):
+    success: bool
+    template: str
+    on_conflict: str
+    actions: list[TemplateAction] = Field(default_factory=list)
+    detail: Optional[str] = None
+
+
+class DetectedProviderItem(BaseModel):
+    alias: str
+    provider_type: str
+    api_key_env: str
+    base_url: Optional[str] = None
+    default_model: Optional[str] = None
+    source_label: str
+    registered: bool
+
+
+class ProviderDetectionResponse(BaseModel):
+    candidates: list[DetectedProviderItem] = Field(default_factory=list)
+    first_launch: bool = False
+
+
+class ProviderRegisterRequest(BaseModel):
+    aliases: list[str] = Field(default_factory=list)
+
+
+class ProviderRegisterResponse(BaseModel):
+    success: bool
+    registered: list[str] = Field(default_factory=list)
+    skipped: list[str] = Field(default_factory=list)
+
+
+class ResetTargetItem(BaseModel):
+    path: str
+    kind: str
+    group: str
+    label: str
+    entries: int
+    size: int
+
+
+class ResetPlanResponse(BaseModel):
+    config_dir: str
+    include_artifacts: bool
+    targets: list[ResetTargetItem] = Field(default_factory=list)
+    notes: list[str] = Field(default_factory=list)
+
+
+class ResetRequest(BaseModel):
+    include_artifacts: bool = False
+    confirmed: bool = Field(False, description="The user answered Y(es) to the confirmation")
+
+
+class ResetResponse(BaseModel):
+    success: bool
+    removed: list[str] = Field(default_factory=list)
+    failed: list[str] = Field(default_factory=list)
+    notes: list[str] = Field(default_factory=list)
+    restart_required: bool = False
 
 
 # ---------------------------------------------------------------------------
@@ -1567,6 +1650,44 @@ def create_web_app(read_only: bool = False) -> FastAPI:
             session.delete(provider)
             return {"success": True}
 
+    @app.post("/api/v1/providers/detect", response_model=ProviderDetectionResponse)
+    async def detect_providers():
+        """Run detection now and report the candidates without registering anything.
+
+        Side-effect free: it reads env vars, probes ports, and flags which candidates
+        are already registered. Registering is a separate call the user confirms by
+        picking the aliases.
+        """
+        from hobees.core import provider_detector
+
+        registered_aliases = provider_detector.get_registered_provider_aliases()
+        candidates = [
+            DetectedProviderItem(**candidate, registered=candidate["alias"] in registered_aliases)
+            for candidate in provider_detector.detect_available_providers()
+        ]
+        return ProviderDetectionResponse(
+            candidates=candidates, first_launch=provider_detector.is_first_launch()
+        )
+
+    @app.post("/api/v1/providers/detect/register", response_model=ProviderRegisterResponse)
+    async def register_detected_providers(body: ProviderRegisterRequest):
+        """Register the detected candidates the user picked, by alias."""
+        from hobees.core import provider_detector
+
+        specs = []
+        for alias in body.aliases:
+            spec = provider_detector.find_detection_spec(alias)
+            if spec is None:
+                raise HTTPException(400, f"{alias!r} is not a known detection candidate")
+            specs.append(spec)
+
+        registered = provider_detector.auto_register_providers(specs) if specs else []
+        return ProviderRegisterResponse(
+            success=True,
+            registered=registered,
+            skipped=[alias for alias in body.aliases if alias not in registered],
+        )
+
     # --- Bees ---
 
     @app.get("/api/v1/bees", response_model=list[BeeResponse])
@@ -1862,7 +1983,6 @@ def create_web_app(read_only: bool = False) -> FastAPI:
     @app.post("/api/v1/config/yaml")
     async def import_config_yaml(yaml_text: str = Body(..., media_type="text/plain")):
         import yaml
-        from hobees.cli.import_cmd import import_config
 
         try:
             parsed = yaml.safe_load(yaml_text)
@@ -1877,6 +1997,8 @@ def create_web_app(read_only: bool = False) -> FastAPI:
         try:
             with os.fdopen(fd, "w", encoding="utf-8") as handle:
                 handle.write(yaml_text)
+            from hobees.cli.import_cmd import import_config
+
             import_config(tmp_path, dry_run=False, force=True)
         except HTTPException:
             raise
@@ -1889,6 +2011,113 @@ def create_web_app(read_only: bool = False) -> FastAPI:
                 pass
 
         return {"success": True}
+
+    # --- Templates (Quick setup) ---
+
+    @app.get("/api/v1/templates", response_model=list[TemplateItem])
+    async def list_templates():
+        """Built-in templates with what each creates and which names it would collide with."""
+        import yaml
+
+        from hobees.cli.import_cmd import CONFIG_SECTIONS, analyze_config_conflicts
+        from hobees.templates import AVAILABLE_TEMPLATES, get_template_text
+
+        items: list[TemplateItem] = []
+        for name, description in AVAILABLE_TEMPLATES.items():
+            text = get_template_text(name)
+            parsed = yaml.safe_load(text) or {}
+            counts = {
+                section: (len(value) if isinstance(value, list) else (1 if value else 0))
+                for section, value in ((section, parsed.get(section)) for section in CONFIG_SECTIONS)
+            }
+            items.append(
+                TemplateItem(
+                    name=name,
+                    description=description,
+                    yaml=text,
+                    counts=counts,
+                    conflicts=analyze_config_conflicts(parsed),
+                )
+            )
+        return items
+
+    @app.post("/api/v1/templates/apply", response_model=TemplateApplyResponse)
+    async def apply_template(body: TemplateApplyRequest):
+        """Apply one built-in template through the shared import engine.
+
+        Existing names are kept as they are (`skip`, the default) or updated
+        (`overwrite`). A template that collides must be confirmed by the user first:
+        without `confirmed` the request is refused with the collision list.
+        """
+        import yaml
+
+        from hobees.cli.import_cmd import (
+            CONFLICT_MODES,
+            analyze_config_conflicts,
+            collision_text,
+            import_config,
+        )
+        from hobees.templates import AVAILABLE_TEMPLATES, get_template_text
+
+        if body.template not in AVAILABLE_TEMPLATES:
+            raise HTTPException(404, f"Unknown template {body.template!r}")
+        if body.on_conflict not in CONFLICT_MODES:
+            raise HTTPException(400, f"on_conflict must be one of: {', '.join(CONFLICT_MODES)}")
+
+        text = get_template_text(body.template)
+        parsed = yaml.safe_load(text) or {}
+        if not isinstance(parsed, dict):
+            raise HTTPException(400, f"Template {body.template!r} is not a mapping")
+
+        conflicts = analyze_config_conflicts(parsed)
+        if conflicts and not body.confirmed:
+            raise HTTPException(409, collision_text(conflicts))
+
+        def action_for(section: str, name: str) -> str:
+            if name not in conflicts.get(section, []):
+                return "create"
+            return "update" if body.on_conflict == "overwrite" else "kept"
+
+        actions: list[TemplateAction] = []
+        for section, field_name in (
+            ("providers", "alias"),
+            ("bees", "name"),
+            ("hives", "name"),
+            ("skills", "name"),
+        ):
+            for entry in parsed.get(section) or []:
+                if not isinstance(entry, dict) or not entry.get(field_name):
+                    continue
+                name = str(entry[field_name])
+                actions.append(TemplateAction(section=section, name=name, action=action_for(section, name)))
+        for entry in parsed.get("memory") or []:
+            if not isinstance(entry, dict) or not entry.get("key"):
+                continue
+            name = f"{entry.get('namespace', 'global')}/{entry['key']}"
+            actions.append(TemplateAction(section="memory", name=name, action=action_for("memory", name)))
+        if parsed.get("assistant"):
+            actions.append(TemplateAction(section="assistant", name="assistant", action=action_for("assistant", "assistant")))
+
+        fd, tmp_name = tempfile.mkstemp(suffix=".yaml", text=True)
+        tmp_path = Path(tmp_name)
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as handle:
+                handle.write(text)
+            import_config(tmp_path, dry_run=False, force=True, on_conflict=body.on_conflict)
+        except Exception as exc:
+            raise HTTPException(400, f"Failed to apply template {body.template!r}: {exc}") from exc
+        finally:
+            try:
+                tmp_path.unlink(missing_ok=True)
+            except OSError:
+                pass
+
+        return TemplateApplyResponse(
+            success=True,
+            template=body.template,
+            on_conflict=body.on_conflict,
+            actions=actions,
+        )
 
     # --- Runs ---
 
@@ -2450,6 +2679,54 @@ def create_web_app(read_only: bool = False) -> FastAPI:
         if download:
             return FileResponse(file_path, filename=file_path.name)
         return FileResponse(file_path)
+
+    # --- Reset the slate ---
+
+    def _same_origin(request: Request) -> bool:
+        """Accept a browser request only when its Origin matches the served host.
+
+        Reset is the most destructive endpoint on the app, so it must not be
+        reachable from a page on another origin. Non-browser clients (curl, the CLI)
+        send no Origin header and are allowed.
+        """
+        origin = request.headers.get("origin")
+        if not origin:
+            return True
+        return urlsplit(origin).netloc == request.headers.get("host")
+
+    @app.get("/api/v1/reset/plan", response_model=ResetPlanResponse)
+    async def reset_plan_view(include_artifacts: bool = Query(False)):
+        """Preview what `hobees reset` would remove; nothing is deleted here."""
+        from hobees.core import reset as reset_core
+
+        plan = reset_core.build_plan(include_artifacts=include_artifacts)
+        return ResetPlanResponse(**plan.to_dict())
+
+    @app.post("/api/v1/reset", response_model=ResetResponse)
+    async def reset_slate(body: ResetRequest, request: Request):
+        """Clean the slate. Blocked in read-only mode and requires an explicit confirmation.
+
+        The caller must have asked the user first: `confirmed` is the recorded Y(es)
+        answer. Without it the request is rejected and nothing is removed.
+        """
+        from hobees.core import reset as reset_core
+
+        if not _same_origin(request):
+            raise HTTPException(403, "Reset only accepts requests from the page it serves.")
+        if not body.confirmed:
+            raise HTTPException(400, "Reset requires confirmation: the user must answer Y(es).")
+
+        plan = reset_core.build_plan(include_artifacts=body.include_artifacts)
+        # apply_plan() releases the engine pool first, which is what lets a SQLite file
+        # held open by this process be deleted on Windows.
+        result = reset_core.apply_plan(plan)
+        return ResetResponse(
+            success=bool(result.removed) and not result.failed,
+            removed=result.removed,
+            failed=result.failed,
+            notes=result.notes,
+            restart_required=bool(result.removed),
+        )
 
     # --- SSE Streams ---
 
