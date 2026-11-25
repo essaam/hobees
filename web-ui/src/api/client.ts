@@ -7,9 +7,9 @@ import type {
   BeeCreate,
   BeeUpdate,
   ConfigYamlResponse,
-  ContainerActionResponse,
   ContainerListResponse,
   ContainerPlanResponse,
+  ContainerSaveRequest,
   ContainerSaveResponse,
   ContainerSpec,
   Hive,
@@ -92,13 +92,8 @@ export const api = {
   getContainerPlan: () => request<ContainerPlanResponse>('/containers/plan'),
   buildContainerPlan: (body: ContainerSpec) =>
     request<ContainerPlanResponse>('/containers/plan', { method: 'POST', body: JSON.stringify(body) }),
-  saveContainerFiles: (body: { compose: string; dockerfile: string }) =>
+  saveContainerFiles: (body: ContainerSaveRequest) =>
     request<ContainerSaveResponse>('/containers/files', { method: 'POST', body: JSON.stringify(body) }),
-  runContainerAction: (body: { action: string; service?: string; detach?: boolean; tail?: number }) =>
-    request<ContainerActionResponse>('/containers/action', {
-      method: 'POST',
-      body: JSON.stringify(body),
-    }),
 
   getProviders: () => request<Provider[]>('/providers'),
   createProvider: (body: ProviderCreate) =>

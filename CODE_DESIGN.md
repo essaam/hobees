@@ -632,6 +632,7 @@ flowchart TD
 | `core/model_discovery.py` | Auto-fetch models from local/remote providers | `fetch_provider_models()` |
 | `core/context_manager.py` | Worker projection, tool truncation, compaction | `project_worker_context()`, `truncate_tool_output()`, `compact_messages()` |
 | `core/memory_manager.py` | Scoped memory CRUD + prompt injection | `upsert_memory()`, `build_memory_block()`, `extract_namespaces()`, `save_memory`, `recall_memory` |
+| `core/config_export.py` | The active configuration as an importable document (shared by the Web UI YAML view and the Containers tab) | `config_document()`, `config_yaml()`, `has_config()` |
 | `core/skill_harvester.py` | Heuristic-based skill draft extraction for completed Hive runs and Markdown sync | `should_harvest()`, `harvest_completed_run()`, `extract_skill_draft()`, `persist_skill()`, `sync_skills_from_markdown()` |
 | `core/reset.py` | Reset scope + plan for the files hobees created inside `~/.hobees` (config scope, `--all` scope) | `build_plan()`, `apply_plan()`, `configured_database_file()`, `ResetPlan`, `ResetTarget`, `ResetResult` |
 | `cli/main.py` | Typer entrypoint, init, stats, serve, prompt, shell, reset | `app` (Typer), `init()`, `stats()`, `serve()`, `prompt()` |
@@ -643,6 +644,8 @@ flowchart TD
 | `cli/memory_cmd.py` | Memory CRUD across namespaces | `cmd_memory_list()`, `cmd_memory_add()`, `cmd_memory_forget()`, `cmd_memory_show()` |
 | `cli/skill_cmd.py` | Skill CRUD + assign + Markdown sync | `cmd_skill_list()`, `cmd_skill_create()`, `cmd_skill_save_last()`, `cmd_skill_assign()`, `cmd_skill_sync()` |
 | `cli/import_cmd.py` | Declarative config import (providers → bees → hives → memory → skills → assistant), collision analysis, conflict mode | `import_config()`, `analyze_config_conflicts()`, `collision_text()`, `CONFLICT_MODES` |
+| `core/pipeline_status.py` | How a pipeline learns a run ended: status to exit code, and the manifest read back | `pipeline_exit_code()`, `is_terminal()`, `manifest_entry()`, `read_manifest()`, `manifest_path_for()` |
+| `cli/pipeline_cmd.py` | `hobees pipeline status` for CI/job steps: manifest or run row, optional wait, exits with the mapped code | `cmd_pipeline_status()` |
 | `cli/reset_cmd.py` | Headless `hobees reset` presentation: plan listing, Y(es) confirmation, removal report | `reset_command()`, `print_plan()`, `_confirm_yes()` |
 | `api/app.py` | FastAPI REST + SSE endpoints | `create_app()` (FastAPI factory) |
 

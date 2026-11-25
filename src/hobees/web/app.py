@@ -14,7 +14,6 @@ import json
 import logging
 import mimetypes
 import os
-import subprocess
 import tempfile
 import time
 import uuid
@@ -412,30 +411,27 @@ class ContainerPlanResponse(BaseModel):
     spec: dict[str, Any]
     compose: str
     dockerfile: str
+    #: The active configuration, the entrypoint script and the goal, as generated text.
+    config: str = ""
+    entrypoint: str = ""
+    goal: str = ""
+    pipeline_command: list[str] = Field(default_factory=list)
     warnings: list[str] = Field(default_factory=list)
     docker_available: bool
     project_dir: str
     compose_exists: bool
     dockerfile_exists: bool
+    config_exists: bool = False
+    goal_exists: bool = False
 
 
 class ContainerFilesRequest(BaseModel):
     compose: str
     dockerfile: str
-
-
-class ContainerActionRequest(BaseModel):
-    action: str
-    service: Optional[str] = None
-    detach: bool = True
-    tail: Optional[int] = None
-
-
-class ContainerActionResponse(BaseModel):
-    success: bool
-    command: list[str]
-    output: str
-    detail: Optional[str] = None
+    config: str = ""
+    entrypoint: str = ""
+    goal: str = ""
+    spec: Optional[ContainerSpec] = None
 
 
 class TemplateItem(BaseModel):
@@ -448,7 +444,7 @@ class TemplateItem(BaseModel):
 
 class TemplateApplyRequest(BaseModel):
     template: str
-    on_conflict: str = Field("skip", description="skip | overwrite — what to do with names that already exist")
+    on_conflict: str = Field("skip", description="skip | overwrite â€” what to do with names that already exist")
     confirmed: bool = Field(False, description="The user confirmed a template that collides")
 
 
@@ -474,7 +470,6 @@ class DetectedProviderItem(BaseModel):
     default_model: Optional[str] = None
     source_label: str
     registered: bool
-
 
 class ProviderDetectionResponse(BaseModel):
     candidates: list[DetectedProviderItem] = Field(default_factory=list)
@@ -1386,16 +1381,31 @@ def create_web_app(read_only: bool = False) -> FastAPI:
     def _container_plan_response(spec) -> ContainerPlanResponse:
         from hobees.core import container_prep
 
+        from hobees.core import config_export
+
         root = container_prep.project_root()
+        document = config_export.config_document()
+        warnings = list(spec.warnings())
+        if not config_export.has_config(document):
+            warnings.append(
+                "the active configuration is empty: nothing would be copied into the image"
+            )
+
         return ContainerPlanResponse(
             spec=spec.model_dump(),
             compose=container_prep.compose_yaml(spec),
             dockerfile=container_prep.dockerfile_text(spec),
-            warnings=spec.warnings(),
+            config=config_export.config_yaml(document),
+            entrypoint=container_prep.entrypoint_text(spec),
+            goal=spec.goal,
+            pipeline_command=spec.pipeline_command(),
+            warnings=warnings,
             docker_available=container_prep.docker_available(),
             project_dir=str(root),
             compose_exists=(root / container_prep.DEFAULT_COMPOSE_FILE).is_file(),
             dockerfile_exists=(root / container_prep.DEFAULT_DOCKERFILE).is_file(),
+            config_exists=(root / spec.config_file).is_file(),
+            goal_exists=(root / spec.goal_file).is_file(),
         )
 
     @app.get("/api/v1/containers/plan", response_model=ContainerPlanResponse)
@@ -1405,7 +1415,10 @@ def create_web_app(read_only: bool = False) -> FastAPI:
 
         with session_scope() as session:
             key_envs = [p.api_key_env for p in session.query(LLMProvider).all()]
-        return _container_plan_response(container_prep.default_spec(key_envs))
+            first_hive = session.query(Hive).order_by(Hive.name).first()
+        return _container_plan_response(
+            container_prep.default_spec(key_envs, run_hive=first_hive.name if first_hive else "")
+        )
 
     @app.post("/api/v1/containers/plan", response_model=ContainerPlanResponse)
     async def build_container_plan(spec: ContainerSpec):
@@ -1417,47 +1430,27 @@ def create_web_app(read_only: bool = False) -> FastAPI:
         """Write compose.yaml / Dockerfile to the project root (fixed names)."""
         from hobees.core import container_prep
 
+        spec = body.spec or container_prep.ContainerSpec()
         _, warnings = container_prep.validate_compose(body.compose)
-        saved = container_prep.save_project_files(body.compose, body.dockerfile)
+
+        # Fixed names, and only inside the project root. The goal is written when a file
+        # is what the container reads (mount or bake); stdin mode has no file to write.
+        files = {
+            container_prep.DEFAULT_COMPOSE_FILE: body.compose,
+            container_prep.DEFAULT_DOCKERFILE: body.dockerfile,
+            spec.config_file: body.config,
+            spec.entrypoint_file: body.entrypoint,
+        }
+        if spec.goal_mode != "stdin":
+            files[spec.goal_file] = body.goal
+
+        saved = container_prep.save_project_files(files)
         return {
             "success": True,
             "saved": [str(path) for path in saved],
-            "warnings": warnings,
+            "warnings": warnings + spec.warnings(),
             "project_dir": str(container_prep.project_root()),
         }
-
-    @app.post("/api/v1/containers/action", response_model=ContainerActionResponse)
-    async def run_container_action(body: ContainerActionRequest):
-        """Run one allowlisted `docker compose` subcommand, never an arbitrary shell."""
-        from hobees.core import container_prep
-
-        if body.action not in container_prep.ALLOWED_ACTIONS:
-            raise HTTPException(
-                400, f"action must be one of {', '.join(container_prep.ALLOWED_ACTIONS)}"
-            )
-        command = container_prep.compose_command(
-            body.action,
-            service=body.service,
-            detach=body.detach,
-            tail=body.tail,
-        )
-        try:
-            output = container_prep.run_compose(
-                body.action,
-                container_prep.project_root(),
-                service=body.service,
-                detach=body.detach,
-                tail=body.tail,
-            )
-        except ValueError as exc:
-            return ContainerActionResponse(success=False, command=command, output="", detail=str(exc))
-        except subprocess.TimeoutExpired:
-            return ContainerActionResponse(
-                success=False, command=command, output="", detail="docker compose timed out"
-            )
-        except Exception as exc:
-            return ContainerActionResponse(success=False, command=command, output="", detail=str(exc))
-        return ContainerActionResponse(success=True, command=command, output=output)
 
 
     # --- Providers ---
@@ -1904,81 +1897,9 @@ def create_web_app(read_only: bool = False) -> FastAPI:
 
     @app.get("/api/v1/config/yaml", response_model=ConfigYamlResponse)
     async def export_config():
-        import yaml
+        from hobees.core.config_export import config_yaml
 
-        with session_scope() as session:
-            providers = session.query(LLMProvider).order_by(LLMProvider.alias).all()
-            bees = session.query(Bee).order_by(Bee.name).all()
-            hives = session.query(Hive).order_by(Hive.name).all()
-            skills = session.query(Skill).order_by(Skill.name).all()
-            memories = session.query(Memory).order_by(Memory.namespace, Memory.key).all()
-
-            config: dict[str, Any] = {
-                "providers": [
-                    {
-                        "alias": p.alias,
-                        "provider_type": p.provider_type,
-                        **({"base_url": p.base_url} if p.base_url else {}),
-                        "api_key_env": p.api_key_env or "NONE",
-                        **({"default_model": p.default_model} if p.default_model else {}),
-                        **({"assistant_model": p.assistant_model} if getattr(p, "assistant_model", None) else {}),
-                        "input_cost_per_1m": float(p.input_cost_per_1m or 0.0),
-                        "output_cost_per_1m": float(p.output_cost_per_1m or 0.0),
-                        "context_window_tokens": p.context_window_tokens or 128000,
-                    }
-                    for p in providers
-                ],
-                "bees": [
-                    {
-                        "name": b.name,
-                        "role_description": b.role_description,
-                        "system_prompt": b.system_prompt or "",
-                        "provider": b.provider.alias if b.provider else None,
-                        "model": b.model_name,
-                        "temperature": float(b.temperature or 0.0),
-                        "thinking_level": b.thinking_level or "off",
-                        "tools": list(b.tool_names or []),
-                        "require_approval": list(b.require_approval or []),
-                    }
-                    for b in bees
-                ],
-                "hives": [
-                    {
-                        "name": h.name,
-                        **({"goal_description": h.goal_description} if h.goal_description else {}),
-                        "supervisor_provider": h.supervisor_provider.alias if h.supervisor_provider else None,
-                        "supervisor_model": h.supervisor_model_name,
-                        **({"supervisor_prompt": h.supervisor_prompt} if h.supervisor_prompt else {}),
-                        "supervisor_thinking_level": h.supervisor_thinking_level or "medium",
-                        "is_dynamic": bool(h.is_dynamic),
-                        **({"project_path": h.project_path} if h.project_path else {}),
-                        "bees": [m.bee.name for m in (h.memberships or []) if m.bee],
-                    }
-                    for h in hives
-                ],
-            }
-            if skills:
-                config["skills"] = [
-                    {
-                        "name": s.name,
-                        "description": s.description,
-                        "instructions": s.instructions,
-                        "tags": list(s.tags or []),
-                        "bees": [b.name for b in (s.bees or [])],
-                    }
-                    for s in skills
-                ]
-            if memories:
-                config["memory"] = [
-                    {
-                        "namespace": m.namespace,
-                        "key": m.key,
-                        "content": m.content,
-                    }
-                    for m in memories
-                ]
-
-        return ConfigYamlResponse(yaml=yaml.safe_dump(config, sort_keys=False, allow_unicode=True))
+        return ConfigYamlResponse(yaml=config_yaml())
 
     @app.post("/api/v1/config/yaml")
     async def import_config_yaml(yaml_text: str = Body(..., media_type="text/plain")):

@@ -30,17 +30,33 @@ export interface ContainerSpec {
   include_db: boolean;
   db_image: string;
   db_volume: string;
+  // What the container carries and runs.
+  config_file: string;
+  goal: string;
+  goal_file: string;
+  goal_mode: 'mount' | 'bake' | 'stdin';
+  run_hive: string;
+  run_init: boolean;
+  entrypoint_file: string;
+  include_web: boolean;
+  web_service_name: string;
 }
 
 export interface ContainerPlanResponse {
   spec: ContainerSpec;
   compose: string;
   dockerfile: string;
+  config: string;
+  entrypoint: string;
+  goal: string;
+  pipeline_command: string[];
   warnings: string[];
   docker_available: boolean;
   project_dir: string;
   compose_exists: boolean;
   dockerfile_exists: boolean;
+  config_exists: boolean;
+  goal_exists: boolean;
 }
 
 export interface ContainerSaveResponse {
@@ -50,11 +66,13 @@ export interface ContainerSaveResponse {
   project_dir: string;
 }
 
-export interface ContainerActionResponse {
-  success: boolean;
-  command: string[];
-  output: string;
-  detail?: string | null;
+export interface ContainerSaveRequest {
+  compose: string;
+  dockerfile: string;
+  config?: string;
+  entrypoint?: string;
+  goal?: string;
+  spec?: ContainerSpec;
 }
 
 export interface Provider {

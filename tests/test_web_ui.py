@@ -70,23 +70,26 @@ def test_studio_has_a_containers_tab_wired_to_the_api():
     assert "ContainersTab" in studio
     assert "useContainerPlan" in studio
     assert "useSaveContainerFiles" in studio
-    assert "useRunContainerAction" in studio
+    # Generation only: the tab writes files, it never starts or stops a container.
+    assert "Update spec" in studio
+    assert "Download all files" in studio
+    assert "runAction" not in studio
+    assert "/containers/action" not in read("api/client.ts")
     assert "Save to project" in studio
     assert "Export compose" in studio
     assert "docker is not available on this host" in studio
-    assert "Only allowlisted docker compose subcommands are run." in studio
+    assert "nothing here starts or stops a container" in studio
 
     client = read("api/client.ts")
-    for endpoint in ("/containers/plan", "/containers/files", "/containers/action"):
+    for endpoint in ("/containers/plan", "/containers/files"):
         assert endpoint in client
 
     hooks = read("hooks/useApi.ts")
-    for hook in ("useContainerPlan", "useBuildContainerPlan", "useSaveContainerFiles", "useRunContainerAction"):
+    for hook in ("useContainerPlan", "useBuildContainerPlan", "useSaveContainerFiles"):
         assert hook in hooks
 
     types = read("types/index.ts")
     assert "ContainerPlanResponse" in types
-    assert "ContainerActionResponse" in types
     assert "ContainerSpec" in types
 
 
@@ -265,3 +268,24 @@ def test_dev_server_proxy_matches_the_web_ui_default_port():
     vite = Path(__file__).resolve().parents[1] / "web-ui" / "vite.config.ts"
     text = vite.read_text(encoding="utf-8")
     assert "http://127.0.0.1:6543" in text
+def test_containers_tab_runs_the_goal_from_a_file_or_pipe():
+    studio = read("pages/Studio.tsx")
+
+    assert "Run for this goal" in studio
+    assert "(['mount', 'bake', 'stdin'] as const)" in studio
+    assert "docker compose run --rm --profile pipeline" in studio
+    assert "The goal text is never written into the entrypoint script" in studio
+    assert "hobees init --config" in studio
+    assert "Export hobees.yaml" in studio
+    assert "Export entrypoint" in studio
+    assert "The exit code is how a pipeline learns the outcome" in studio
+    assert "State.ExitCode" in studio
+    assert "hobees pipeline status" in studio
+    assert "Download all files" in studio
+
+def test_preview_refreshes_the_run_command_with_the_settings():
+    studio = read("pages/Studio.tsx")
+    # The tab used to show a stale run command: preview must refresh the whole plan.
+    for call in ("setPipeline(res.pipeline_command)", "setConfig(res.config)", "setEntrypoint(res.entrypoint)"):
+        assert call in studio
+    assert "include the web service" in studio

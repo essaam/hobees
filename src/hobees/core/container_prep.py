@@ -1,8 +1,15 @@
 """Container preparation: compose/Dockerfile generation and guarded lifecycle actions.
 
 This is the deployment side of Studio: the generated files carry environment-variable
-*names*, never secret values, and the spin-up path only runs allowlisted
-`docker compose` subcommands with fixed arguments (no shell, no arbitrary args).
+*names*, never secret values, and nothing here runs `docker` - the tab writes files and
+the pipeline (or a person) executes them. The container's exit code is how a pipeline
+learns the outcome, so the entrypoint script uses `set -eu` and `exec`.
+
+The generated set carries the configuration the user is happy with right now:
+`hobees.yaml` and the entrypoint script are copied into the image, the entrypoint
+initialises the schema with that config and then runs the goal. The goal reaches the
+container as a read-only mount (default), a baked file (opt-in) or stdin - the prompt
+text is never written into the entrypoint script, so it can never be read as shell.
 """
 
 from __future__ import annotations
@@ -10,7 +17,6 @@ from __future__ import annotations
 import os
 import re
 import shutil
-import subprocess
 from pathlib import Path
 from typing import Any
 
@@ -18,17 +24,33 @@ import yaml
 from pydantic import BaseModel, Field
 
 from hobees.config import settings
-from hobees.core.approval import resolve_container_name
-
-#: The only subcommands the web layer may run. A fixed allowlist means a request
-#: can never reach an arbitrary `docker` invocation.
-ALLOWED_ACTIONS: tuple[str, ...] = ("up", "down", "ps", "logs")
 
 DEFAULT_BASE_IMAGE = "python:3.12-slim"
 DEFAULT_COMPOSE_FILE = "compose.yaml"
 DEFAULT_DOCKERFILE = "Dockerfile"
+DEFAULT_ENTRYPOINT_FILE = "docker-entrypoint.sh"
+DEFAULT_CONFIG_FILE = "hobees.yaml"
+DEFAULT_GOAL_FILE = "goal.txt"
+
+#: `hobees web` binds 6543 by default, so the container publishes the same port.
+DEFAULT_WORKING_DIR = "/home/hobees"
+DEFAULT_WEB_PORT = 6543
+
+#: How the goal reaches the container.
+GOAL_MODES: tuple[str, ...] = ("mount", "bake", "stdin")
+GOAL_TARGET = "/data/goal.txt"
+CONFIG_TARGET = "/data/config/hobees.yaml"
+CONTAINER_ENTRYPOINT = "/entrypoint.sh"
+CONTAINER_USER = "hobees:hobees"
+#: Every path written into a generated file is relative to the project root or inside the
+#: image - a path from the author's machine must never end up in a committed file.
+DEFAULT_ARTIFACTS_MOUNT = "./artifacts:/data/artifacts"
+DEFAULT_SKILLS_MOUNT = "./skills:/data/skills"
+#: The name is read from the environment at run time instead of being baked in here.
+CONTAINER_NAME_PLACEHOLDER = "${HOBEES_CONTAINER_NAME:-hobees}"
 
 _SERVICE_NAME = re.compile(r"^[a-z0-9][a-z0-9_.-]*$")
+_FILE_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]*$")
 _SECRET_LIKE = re.compile(r"(?:api[_-]?key|token|secret|password|credential)", re.IGNORECASE)
 
 
@@ -40,13 +62,14 @@ class ContainerSpec(BaseModel):
     image: str = "hobees:local"
     container_name: str = ""
     base_image: str = DEFAULT_BASE_IMAGE
-    working_dir: str = "/app"
+    working_dir: str = DEFAULT_WORKING_DIR
     user: str = "${HOBEES_UID:-1000}:${HOBEES_GID:-1000}"
-    entrypoint: list[str] = Field(default_factory=lambda: ["hobees"])
-    command: list[str] = Field(default_factory=lambda: ["web", "--host", "0.0.0.0", "--port", "8420"])
-    profiles: list[str] = Field(default_factory=lambda: ["runtime_only"])
+    #: Empty means the image's own ENTRYPOINT (the generated script) is used.
+    entrypoint: list[str] = Field(default_factory=list)
+    command: list[str] = Field(default_factory=list)
+    profiles: list[str] = Field(default_factory=lambda: ["pipeline"])
     restart: str = "unless-stopped"
-    ports: list[str] = Field(default_factory=lambda: ["8420:8420"])
+    ports: list[str] = Field(default_factory=lambda: [f"{DEFAULT_WEB_PORT}:{DEFAULT_WEB_PORT}"])
     volumes: list[str] = Field(default_factory=list)
     #: Environment variables the container reads. Values stay `${NAME}` references so
     #: the generated file never contains a key.
@@ -55,20 +78,66 @@ class ContainerSpec(BaseModel):
     include_db: bool = True
     db_image: str = "postgres:16-alpine"
     db_volume: str = "postgres_data"
+    web_service_name: str = "web"
+
+    # --- What the container carries and runs ---
+    #: The active configuration the user is happy with, exported as `hobees.yaml`.
+    config_file: str = DEFAULT_CONFIG_FILE
+    #: The goal prompt and how it reaches the container: mount (default), bake, stdin.
+    #: The text is stored as a file, never written into the entrypoint script.
+    goal: str = ""
+    goal_file: str = DEFAULT_GOAL_FILE
+    goal_mode: str = "mount"
+    #: Hive the pipeline runs; empty means the Queen/auto mode.
+    run_hive: str = ""
+    #: The entrypoint script initializes the schema with the config before the goal.
+    run_init: bool = True
+    entrypoint_file: str = DEFAULT_ENTRYPOINT_FILE
+    #: Running the web app from the container is optional: it stays commented out in
+    #: the generated compose file unless the user asks for it.
+    include_web: bool = False
 
     def resolved_container_name(self) -> str:
-        return self.container_name or resolve_container_name()
+        return self.container_name or CONTAINER_NAME_PLACEHOLDER
+
+    def goal_mount(self) -> str | None:
+        """Read-only goal mount - the pipeline default, so a goal can change without a rebuild."""
+        if self.goal_mode != "mount":
+            return None
+        return f"./{self.goal_file}:{GOAL_TARGET}:ro"
 
     def resolved_volumes(self) -> list[str]:
-        if self.volumes:
-            return list(self.volumes)
-        return ["./artifacts:/data/artifacts", "./skills:/data/skills"]
+        mounts = list(self.volumes) or [DEFAULT_ARTIFACTS_MOUNT, DEFAULT_SKILLS_MOUNT]
+        goal = self.goal_mount()
+        if goal and goal not in mounts:
+            mounts.append(goal)
+        return mounts
+
+    def pipeline_command(self) -> list[str]:
+        """What the entrypoint script runs. Shown so CI can mirror it - it is not baked as
+        `CMD`, because the script is the single place that decides what happens."""
+        args = ["run"]
+        if self.run_hive:
+            args.extend(["--hive", self.run_hive])
+        if self.goal_mode in ("mount", "bake"):
+            args.extend(["--goal-file", GOAL_TARGET])
+        else:
+            args.append("-")
+        args.append("--json")
+        return args
+
+    def resolved_command(self) -> list[str]:
+        """An explicit override only. Left empty, the entrypoint script's own default runs."""
+        return list(self.command)
 
     def resolved_env(self) -> dict[str, str]:
         env = dict(self.env)
         env.setdefault("HOBEES_ARTIFACTS_ROOT", "/data/artifacts")
         env.setdefault("HOBEES_SKILLS_DIR", "/data/skills")
-        env.setdefault("HOBEES_CONTAINER_NAME", self.resolved_container_name())
+        env.setdefault("HOBEES_CONFIG_PATH", CONFIG_TARGET)
+        env.setdefault("HOBEES_GOAL_FILE", GOAL_TARGET)
+        if self.run_hive:
+            env.setdefault("HOBEES_RUN_HIVE", self.run_hive)
         if self.include_db:
             env.setdefault(
                 "HOBEES_DATABASE_URL",
@@ -85,6 +154,16 @@ class ContainerSpec(BaseModel):
             notes.append(f"service name {self.service!r} is not a valid compose service key")
         if not self.profiles:
             notes.append("no profiles set: a plain `docker compose up` would start this service")
+        if self.goal_mode not in GOAL_MODES:
+            notes.append(f"goal_mode {self.goal_mode!r} must be one of {', '.join(GOAL_MODES)}")
+        for name in (self.config_file, self.goal_file, self.entrypoint_file):
+            if not _FILE_NAME.match(name):
+                notes.append(f"file name {name!r} cannot be written at the project root")
+        if not self.goal.strip():
+            notes.append(
+                "no goal set: the container would start with nothing to run - pipe one "
+                "(`docker compose run -T --rm --profile pipeline <service>`) or fill the goal field"
+            )
         for key, value in self.resolved_env().items():
             if _SECRET_LIKE.search(key) and not str(value).startswith("${"):
                 notes.append(f"{key} is written as a literal value; use a ${{{key}}} reference instead")
@@ -101,10 +180,14 @@ def compose_document(spec: ContainerSpec) -> dict[str, Any]:
         "env_file": [".env"],
         "environment": spec.resolved_env(),
         "volumes": spec.resolved_volumes(),
-        "entrypoint": spec.entrypoint,
-        "command": spec.command,
         "init": True,
     }
+    # Only an override the user typed is written: the entrypoint script already runs
+    # init then the goal, so a default `command` would duplicate that decision.
+    if spec.command:
+        service["command"] = list(spec.command)
+    if spec.entrypoint:
+        service["entrypoint"] = list(spec.entrypoint)
     if spec.profiles:
         service["profiles"] = spec.profiles
     if spec.ports:
@@ -115,8 +198,7 @@ def compose_document(spec: ContainerSpec) -> dict[str, Any]:
     document: dict[str, Any] = {"services": {spec.service: service}}
 
     if spec.include_db:
-        document["services"]["db"] = {
-            "image": spec.db_image,
+        document["services"]["db"] = {            "image": spec.db_image,
             "environment": {
                 "POSTGRES_DB": "${POSTGRES_DB:-hobees}",
                 "POSTGRES_USER": "${POSTGRES_USER:-hobees}",
@@ -134,7 +216,39 @@ def compose_document(spec: ContainerSpec) -> dict[str, Any]:
         service["depends_on"] = {"db": {"condition": "service_healthy"}}
         document["volumes"] = {spec.db_volume: None}
 
+    if spec.include_web:
+        # Only when asked for: a pipeline does not need the web app running in the container.
+        document["services"][spec.web_service_name] = {
+            "build": {"context": ".", "dockerfile": DEFAULT_DOCKERFILE},
+            "image": spec.image,
+            "profiles": ["ui"],
+            "env_file": [".env"],
+            "ports": [f"{DEFAULT_WEB_PORT}:{DEFAULT_WEB_PORT}"],
+            "command": ["web", "--host", "0.0.0.0", "--port", str(DEFAULT_WEB_PORT)],
+        }
+
     return document
+
+
+def optional_web_block(spec: ContainerSpec) -> str:
+    """The commented-out web service - running the web app in the container is optional."""
+    if spec.include_web:
+        return ""
+    port = DEFAULT_WEB_PORT
+    return (
+        "\n# Optional: the web app is not needed to run a goal, so this stays commented out.\n"
+        "# Uncomment to serve the dashboard from the container; the keys still come from .env.\n"
+        f"# {spec.web_service_name}:\n"
+        "#   build:\n"
+        "#     context: .\n"
+        f"#     dockerfile: {DEFAULT_DOCKERFILE}\n"
+        f"#   image: {spec.image}\n"
+        "#   profiles: [ui]\n"
+        "#   env_file: [.env]\n"
+        "#   ports:\n"
+        f'#     - "{port}:{port}"\n'
+        f'#   command: ["web", "--host", "0.0.0.0", "--port", "{port}"]\n'
+    )
 
 
 def compose_yaml(spec: ContainerSpec) -> str:
@@ -142,16 +256,13 @@ def compose_yaml(spec: ContainerSpec) -> str:
         f"# {spec.project} - generated by hobees Studio (Containers)\n"
         "# Environment values come from .env; no secret values are written here.\n"
     )
-    return header + yaml.safe_dump(compose_document(spec), sort_keys=False, allow_unicode=True)
+    return header + yaml.safe_dump(compose_document(spec), sort_keys=False, allow_unicode=True) + optional_web_block(spec)
 
 
-def default_spec(api_key_envs: list[str] | None = None) -> ContainerSpec:
+def default_spec(api_key_envs: list[str] | None = None, run_hive: str = "") -> ContainerSpec:
     """Spec built from the running settings, so Studio starts from what is live now."""
-    root = Path(settings.artifacts_root)
-    skills = Path(settings.skills_dir)
     return ContainerSpec(
-        container_name=resolve_container_name(),
-        volumes=[f"./{root.as_posix()}:/data/artifacts", f"./{skills.as_posix()}:/data/skills"],
+        run_hive=run_hive,
         api_key_envs=[name for name in (api_key_envs or []) if name and name != "NONE"],
     )
 
@@ -194,14 +305,20 @@ def project_root() -> Path:
     return Path(os.getenv("HOBEES_PROJECT_ROOT", Path.cwd())).resolve()
 
 
-def save_project_files(compose_text: str, dockerfile: str, root: Path | str | None = None) -> list[Path]:
-    """Write `compose.yaml` and `Dockerfile` at the project root.
+def save_project_files(files: dict[str, str], root: Path | str | None = None) -> list[Path]:
+    """Write the generated files at the project root.
 
-    The file names are fixed, so a request cannot steer the write anywhere else.
+    Names are validated (no path separators) and every target is checked against the
+    project root, so a request cannot steer a write anywhere else. Empty content is
+    skipped rather than creating an empty file.
     """
     target = Path(root).resolve() if root else project_root()
     written: list[Path] = []
-    for name, content in ((DEFAULT_COMPOSE_FILE, compose_text), (DEFAULT_DOCKERFILE, dockerfile)):
+    for name, content in files.items():
+        if not content:
+            continue
+        if not _FILE_NAME.match(name):
+            raise ValueError(f"{name!r} cannot be written at the project root as a plain file name")
         path = target / name
         if not path.resolve().is_relative_to(target):
             raise ValueError(f"{name} cannot be written outside the project root")
@@ -210,93 +327,124 @@ def save_project_files(compose_text: str, dockerfile: str, root: Path | str | No
     return written
 
 
+def generated_files(spec: ContainerSpec, contents: dict[str, str]) -> dict[str, str]:
+    """The names the plan writes: compose, Dockerfile, config, goal (when baked), script."""
+    files = {
+        DEFAULT_COMPOSE_FILE: contents.get(DEFAULT_COMPOSE_FILE, ""),
+        DEFAULT_DOCKERFILE: contents.get(DEFAULT_DOCKERFILE, ""),
+        spec.config_file: contents.get(spec.config_file, ""),
+        spec.entrypoint_file: contents.get(spec.entrypoint_file, ""),
+    }
+    if spec.goal_mode == "bake":
+        files[spec.goal_file] = contents.get(spec.goal_file, "")
+    return files
+
+
 def docker_available() -> bool:
     return shutil.which("docker") is not None
 
 
-def compose_command(
-    action: str,
-    *,
-    compose_file: str = DEFAULT_COMPOSE_FILE,
-    service: str | None = None,
-    detach: bool = True,
-    tail: int | None = None,
-) -> list[str]:
-    """Fixed, allowlisted `docker compose` argv - never a shell string."""
-    if action not in ALLOWED_ACTIONS:
-        raise ValueError(f"action must be one of {', '.join(ALLOWED_ACTIONS)}")
-    argv = ["docker", "compose", "-f", compose_file, action]
-    if action == "up" and detach:
-        argv.append("-d")
-    if action == "logs":
-        argv.extend(["--tail", str(tail if tail is not None else 50)])
-    if service:
-        argv.append(service)
-    return argv
+def entrypoint_text(spec: ContainerSpec) -> str:
+    """The container entrypoint: initialise with the copied config, then run the goal.
 
-
-def run_compose(
-    action: str,
-    project_dir: Path | str,
-    *,
-    compose_file: str = DEFAULT_COMPOSE_FILE,
-    service: str | None = None,
-    detach: bool = True,
-    tail: int | None = None,
-    timeout: int = 120,
-) -> str:
-    if not docker_available():
-        raise ValueError("docker is not available on this host")
-    root = Path(project_dir).resolve()
-    argv = compose_command(action, compose_file=compose_file, service=service, detach=detach, tail=tail)
-    result = subprocess.run(
-        argv,
-        cwd=str(root),
-        capture_output=True,
-        text=True,
-        timeout=timeout,
-        shell=False,
+    Only paths appear in the script - the goal text stays in its own file, so a prompt
+    can never be read as shell by the container. Args passed to `docker compose run`
+    override the default command.
+    """
+    return "\n".join(
+        [
+            "#!/bin/sh",
+            "set -eu",
+            "",
+            "# The exit code is what a pipeline reads: 0 completed, 1 failed, 2 stopped for an",
+            "# approval a headless run cannot answer. `set -eu` and `exec` keep it intact, so",
+            "# nothing between hobees and the container exit code can swallow it.",
+            "",
+            'CONFIG="${HOBEES_CONFIG_PATH:-' + CONFIG_TARGET + '}"',
+            'GOAL="${HOBEES_GOAL_FILE:-' + GOAL_TARGET + '}"',
+            'HIVE="${HOBEES_RUN_HIVE:-}"',
+            "",
+            "run() {",
+            '  if [ -n "$HIVE" ]; then',
+            '    hobees run --hive "$HIVE" "$@"',
+            "  else",
+            "    hobees run \"$@\"",
+            "  fi",
+            "}",
+            "",
+            "# 1. Initialize hobees with the configuration copied into the image.",
+            'if [ -f "$CONFIG" ]; then',
+            '  hobees init --config "$CONFIG"',
+            "fi",
+            "",
+            "# 2. Container args override the default command.",
+            'if [ "$#" -gt 0 ]; then',
+            '  exec hobees "$@"',
+            "fi",
+            "",
+            "# 3. Run the goal: the mounted or baked file, or stdin when the pipeline pipes one.",
+            'if [ -f "$GOAL" ]; then',
+            '  exec run --goal-file "$GOAL" --json',
+            "fi",
+            "exec run - --json",
+            "",
+        ]
     )
-    output = ((result.stdout or "") + (result.stderr or "")).strip()
-    if result.returncode != 0:
-        raise RuntimeError(output or f"docker compose {action} failed")
-    return output
 
 
 def dockerfile_text(spec: ContainerSpec) -> str:
+    """Mirror the repo `Dockerfile`: hobees is installed from PyPI, the source is not in the image."""
+    home = "/home/hobees"
     lines = [
         f"FROM {spec.base_image}",
-        "ENV PYTHONUNBUFFERED=1 PYTHONDONTWRITEBYTECODE=1",
-        f"WORKDIR {spec.working_dir}",
+        "",
+        "ENV PYTHONUNBUFFERED=1 \\",
+        "    PYTHONDONTWRITEBYTECODE=1",
+        "",
+        "# 1. Install uv system-wide as root",
         "RUN pip install --no-cache-dir uv",
-        "COPY pyproject.toml README.md ./",
-        "RUN uv sync --no-dev",
-        "COPY src ./src",
+        "",
+        "# 2. Create the non-root user and the data directories before switching users",
         "RUN groupadd --system --gid 10001 hobees \\",
-        "    && useradd --system --uid 10001 --gid hobees --home-dir /home/hobees --create-home hobees \\",
-        "    && mkdir -p /data/artifacts /data/skills",
-        "    && chown -R hobees:hobees /data /home/hobees",
+        f"    && useradd --system --uid 10001 --gid hobees --home-dir {home} --create-home hobees \\",
+        "    && mkdir -p /data/artifacts /data/skills /data/config \\",
+        f"    && chown -R hobees:hobees /data {home}",
+        "",
+        "# 3. Switch to user space BEFORE running uv commands",
         "USER hobees",
+        f"WORKDIR {spec.working_dir}",
+        "",
+        "# 4. Add the user's local bin directory to PATH",
+        f'ENV PATH="{home}/.local/bin:$PATH"',
+        "",
+        "# 5. Install from PyPi",
+        "RUN uv tool install hobees",
+        "",
+        "# 6. The active configuration and the entrypoint script: init, then the goal",
+        f"ENV HOBEES_CONFIG_PATH={CONFIG_TARGET}",
+        f"COPY --chown={CONTAINER_USER} {spec.config_file} {CONFIG_TARGET}",
+        f"COPY --chown={CONTAINER_USER} {spec.entrypoint_file} {CONTAINER_ENTRYPOINT}",
+        f"RUN chmod +x {CONTAINER_ENTRYPOINT}",
     ]
-    if spec.entrypoint:
-        lines.append("ENTRYPOINT [" + ", ".join(f'"{part}"' for part in spec.entrypoint) + "]")
-    if spec.command:
-        lines.append("CMD [" + ", ".join(f'"{part}"' for part in spec.command) + "]")
+    if spec.goal_mode == "bake":
+        # Baking freezes the prompt into an image layer: a goal change needs a rebuild and the
+        # text shows up in `docker history`. Mount (the default) keeps the image reusable.
+        lines.append(f"COPY --chown={CONTAINER_USER} {spec.goal_file} {GOAL_TARGET}")
+    # A baked CMD would duplicate the script: the script decides, and args passed to
+    # `docker run` / `docker compose run` override it.
+    lines.append("# No CMD on purpose: docker-entrypoint.sh runs init, then the goal; args override it.")
+    lines.append(f'ENTRYPOINT ["{CONTAINER_ENTRYPOINT}"]')
     return "\n".join(lines) + "\n"
 
-
 __all__ = [
-    "ALLOWED_ACTIONS",
     "ContainerSpec",
     "DEFAULT_BASE_IMAGE",
     "DEFAULT_COMPOSE_FILE",
     "DEFAULT_DOCKERFILE",
-    "compose_command",
     "compose_document",
     "compose_yaml",
     "default_spec",
     "docker_available",
     "dockerfile_text",
-    "run_compose",
     "validate_compose",
 ]

@@ -29,7 +29,6 @@ import {
   useContainers,
   useBuildContainerPlan,
   useSaveContainerFiles,
-  useRunContainerAction,
   useApplyTemplate,
   useCreateBee,
   useCreateHive,
@@ -649,41 +648,64 @@ function ContainersTab({ readOnly }: { readOnly: boolean }) {
   const { data: plan, isLoading } = useContainerPlan();
   const buildPlan = useBuildContainerPlan();
   const saveFiles = useSaveContainerFiles();
-  const runAction = useRunContainerAction();
 
   const [fields, setFields] = useState({
     service: 'hobees',
     image: 'hobees:local',
     base_image: 'python:3.12-slim',
     container_name: '',
-    profiles: 'runtime_only',
-    ports: '8420:8420',
+    profiles: 'pipeline',
+    ports: '6543:6543',
     volumes: './artifacts:/data/artifacts, ./skills:/data/skills',
-    command: 'web --host 0.0.0.0 --port 8420',
+    command: '',
     include_db: true,
+    run_hive: '',
+    goal: '',
+    goal_mode: 'mount' as ContainerSpec['goal_mode'],
+    run_init: true,
+    include_web: false,
   });
   const [compose, setCompose] = useState('');
   const [dockerfile, setDockerfile] = useState('');
+  const [config, setConfig] = useState('');
+  const [entrypoint, setEntrypoint] = useState('');
+  const [pipeline, setPipeline] = useState<string[]>([]);
   const [warnings, setWarnings] = useState<string[]>([]);
   const [output, setOutput] = useState('');
+  const synced = useRef('');
+  const dirty = JSON.stringify(fields) !== synced.current;
+
+  const { data: hiveList = [] } = useHives();
 
   useEffect(() => {
     if (!plan) return;
     setCompose(plan.compose);
     setDockerfile(plan.dockerfile);
+    setConfig(plan.config);
+    setEntrypoint(plan.entrypoint);
+    setPipeline(plan.pipeline_command);
     setWarnings(plan.warnings);
-    setFields((prev) => ({
-      ...prev,
-      service: plan.spec.service,
-      image: plan.spec.image,
-      base_image: plan.spec.base_image,
-      container_name: plan.spec.container_name,
-      profiles: plan.spec.profiles.join(', '),
-      ports: plan.spec.ports.join(', '),
-      volumes: plan.spec.volumes.join(', '),
-      command: plan.spec.command.join(' '),
-      include_db: plan.spec.include_db,
-    }));
+    setFields((prev) => {
+      const next = {
+        ...prev,
+        service: plan.spec.service,
+        image: plan.spec.image,
+        base_image: plan.spec.base_image,
+        container_name: plan.spec.container_name,
+        profiles: plan.spec.profiles.join(', '),
+        ports: plan.spec.ports.join(', '),
+        volumes: plan.spec.volumes.join(', '),
+        command: plan.spec.command.join(' '),
+        include_db: plan.spec.include_db,
+        run_hive: plan.spec.run_hive,
+        goal: plan.spec.goal,
+        goal_mode: plan.spec.goal_mode,
+        run_init: plan.spec.run_init,
+        include_web: plan.spec.include_web,
+      };
+      synced.current = JSON.stringify(next);
+      return next;
+    });
   }, [plan]);
 
   const list = (value: string) => value.split(',').map((item) => item.trim()).filter(Boolean);
@@ -694,9 +716,10 @@ function ContainersTab({ readOnly }: { readOnly: boolean }) {
     image: fields.image,
     container_name: fields.container_name,
     base_image: fields.base_image,
-    working_dir: plan?.spec.working_dir ?? '/app',
+    working_dir: plan?.spec.working_dir ?? '/home/hobees',
     user: plan?.spec.user ?? '${HOBEES_UID:-1000}:${HOBEES_GID:-1000}',
-    entrypoint: plan?.spec.entrypoint ?? ['hobees'],
+    // The image ENTRYPOINT is the generated script; only an explicit override belongs here.
+    entrypoint: plan?.spec.entrypoint ?? [],
     command: list(fields.command),
     profiles: list(fields.profiles),
     restart: plan?.spec.restart ?? 'unless-stopped',
@@ -707,14 +730,30 @@ function ContainersTab({ readOnly }: { readOnly: boolean }) {
     include_db: fields.include_db,
     db_image: plan?.spec.db_image ?? 'postgres:16-alpine',
     db_volume: plan?.spec.db_volume ?? 'postgres_data',
+    config_file: plan?.spec.config_file ?? 'hobees.yaml',
+    goal: fields.goal,
+    goal_file: plan?.spec.goal_file ?? 'goal.txt',
+    goal_mode: fields.goal_mode,
+    run_hive: fields.run_hive,
+    run_init: fields.run_init,
+    entrypoint_file: plan?.spec.entrypoint_file ?? 'docker-entrypoint.sh',
+    web_service_name: plan?.spec.web_service_name ?? 'web',
+    include_web: fields.include_web,
   });
 
+  // The run command, the config, the entrypoint script and the goal all follow the settings
+  // in this panel, so previewing must refresh the whole plan, not only compose/Dockerfile.
   const preview = async () => {
     setOutput('');
     try {
-      const res = await buildPlan.mutateAsync(spec());
+      const sent = spec();
+      const res = await buildPlan.mutateAsync(sent);
+      synced.current = JSON.stringify(sent);
       setCompose(res.compose);
       setDockerfile(res.dockerfile);
+      setConfig(res.config);
+      setEntrypoint(res.entrypoint);
+      setPipeline(res.pipeline_command);
       setWarnings(res.warnings);
     } catch (err) {
       setOutput(err instanceof Error ? err.message : 'Preview failed');
@@ -724,27 +763,41 @@ function ContainersTab({ readOnly }: { readOnly: boolean }) {
   const save = async () => {
     if (readOnly) return;
     try {
-      const res = await saveFiles.mutateAsync({ compose, dockerfile });
-      setOutput(`Saved ${res.saved.join(', ')}`);
+      const res = await saveFiles.mutateAsync({
+        compose,
+        dockerfile,
+        config,
+        entrypoint,
+        goal: fields.goal_mode === 'stdin' ? '' : fields.goal,
+        spec: spec(),
+      });
+      setOutput(`Saved ${res.saved.join(', ') || 'nothing (empty content was skipped)'}`);
       setWarnings(res.warnings);
     } catch (err) {
       setOutput(err instanceof Error ? err.message : 'Save failed');
     }
   };
 
-  const run = async (action: string) => {
-    if (readOnly) return;
-    try {
-      const res = await runAction.mutateAsync({ action, service: fields.service, detach: action === 'up' });
-      setOutput(res.success ? res.output : res.detail || `docker compose ${action} failed`);
-    } catch (err) {
-      setOutput(err instanceof Error ? err.message : 'Action failed');
-    }
+  // One download per file, not a pack: staggered so the browser does not swallow the rest.
+  const generatedFiles = () => [
+    { name: 'compose.yaml', content: compose, mime: 'text/yaml' },
+    { name: 'Dockerfile', content: dockerfile, mime: 'text/plain' },
+    { name: 'hobees.yaml', content: config, mime: 'text/yaml' },
+    { name: 'docker-entrypoint.sh', content: entrypoint, mime: 'text/plain' },
+    { name: 'goal.txt', content: fields.goal_mode === 'stdin' ? '' : fields.goal, mime: 'text/plain' },
+  ];
+
+  const downloadAll = () => {
+    const items = generatedFiles().filter((item) => item.content.trim());
+    items.forEach((item, index) => setTimeout(() => downloadText(item.content, item.name, item.mime), index * 200));
+    setOutput(`Downloaded ${items.length} file${items.length === 1 ? '' : 's'} separately`);
   };
+
+  const runCommand = () =>
+    `docker compose run --rm --profile pipeline ${fields.service}${fields.command.trim() ? ` ${fields.command.trim()}` : ''}`;
 
   if (isLoading || !plan) return <EmptyBox text="Reading the container plan…" />;
 
-  const canRunContainer = !readOnly && plan.docker_available;
   return (
     <div className="space-y-3 rounded-xl border border-zinc-200/90 bg-white p-4 shadow-sm">
       <div className="flex flex-wrap items-center justify-between gap-2">
@@ -779,9 +832,112 @@ function ContainersTab({ readOnly }: { readOnly: boolean }) {
         <Field label="Volumes (host:container, comma-separated)">
           <input value={fields.volumes} onChange={(e) => setFields((prev) => ({ ...prev, volumes: e.target.value }))} readOnly={readOnly} className="w-full rounded-lg border border-zinc-200 px-3 py-2 font-mono text-xs" />
         </Field>
-        <Field label="Command">
+        <Field label="Command args (override only - the entrypoint script decides what runs)">
           <input value={fields.command} onChange={(e) => setFields((prev) => ({ ...prev, command: e.target.value }))} readOnly={readOnly} className="w-full rounded-lg border border-zinc-200 px-3 py-2 font-mono text-xs" />
         </Field>
+      </div>
+
+      {/* Run the goal: the container is built to carry the config and run one goal */}
+      <div className="space-y-3 rounded-lg border border-zinc-200 bg-zinc-50/60 p-3">
+        <div className="flex flex-wrap items-center justify-between gap-2">
+          <span className="text-xs font-semibold text-zinc-800">Run for this goal</span>
+          <div className="inline-flex rounded-lg border border-zinc-200 bg-white p-0.5 text-xs font-medium">
+            {(['mount', 'bake', 'stdin'] as const).map((mode) => (
+              <button
+                key={mode}
+                type="button"
+                onClick={() => setFields((prev) => ({ ...prev, goal_mode: mode }))}
+
+                disabled={readOnly}
+                className={cn(
+                  'rounded-md px-2.5 py-1 transition-colors',
+                  fields.goal_mode === mode ? 'bg-zinc-900 text-white' : 'text-zinc-600 hover:text-zinc-900',
+                )}
+              >
+                {mode}
+              </button>
+            ))}
+          </div>
+        </div>
+
+        <Field label="Goal (written to goal.txt at the project root)">
+          <textarea
+            value={fields.goal}
+            onChange={(e) => setFields((prev) => ({ ...prev, goal: e.target.value }))}
+            readOnly={readOnly}
+            spellCheck={false}
+            rows={5}
+            placeholder="Review src/ for race conditions and propose fixes"
+            className="w-full resize-y rounded-lg border border-zinc-200 px-3 py-2 text-xs leading-relaxed focus:outline-none focus:border-zinc-400"
+          />
+        </Field>
+
+        <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+          <Field label="Run hive (empty = Queen auto-mode)">
+            <select
+              value={fields.run_hive}
+              onChange={(e) => setFields((prev) => ({ ...prev, run_hive: e.target.value }))}
+              disabled={readOnly}
+              className="w-full rounded-lg border border-zinc-200 px-3 py-2 font-mono text-xs"
+            >
+              <option value="">(auto-mode)</option>
+              {hiveList.map((hive) => (
+                <option key={hive.id} value={hive.name}>{hive.name}</option>
+              ))}
+            </select>
+          </Field>
+          <p className="text-xs text-zinc-500">
+        This tab only writes files - nothing here starts or stops a container, so the command above is run by you
+        (or by CI). Editing a field does not regenerate by itself: click
+        <span className="font-medium text-zinc-700"> Update spec </span>
+        to apply the settings to compose.yaml, the Dockerfile, hobees.yaml, the entrypoint script and the run command.
+        {dirty ? <span className="font-medium text-amber-700"> Unapplied changes.</span> : null}
+      </p>
+
+      <label className="flex items-center gap-2 text-xs text-zinc-600">
+            <input type="checkbox" checked={fields.run_init} onChange={(e) => setFields((prev) => ({ ...prev, run_init: e.target.checked }))} disabled={readOnly} />
+            entrypoint runs <span className="font-mono">hobees init --config</span> before the goal
+          </label>
+          <label className="flex items-center gap-2 text-xs text-zinc-600">
+            <input type="checkbox" checked={fields.include_web} onChange={(e) => setFields((prev) => ({ ...prev, include_web: e.target.checked }))} disabled={readOnly} />
+            include the web service (it stays commented out when off)
+          </label>
+        </div>
+
+        <p className="text-xs text-zinc-500">
+          {fields.goal_mode === 'mount'
+            ? 'goal.txt is mounted read-only, so the goal can change per run without a rebuild.'
+            : fields.goal_mode === 'bake'
+              ? 'goal.txt is copied into the image: the goal is frozen in a layer and needs a rebuild.'
+              : 'the goal is piped on stdin (docker compose run -T --rm ...), no file is written.'}
+          {' '}The goal text is never written into the entrypoint script, so it can never be read as shell.
+        </p>
+
+        <div className="flex items-center justify-between gap-2 rounded-lg border border-zinc-200 bg-white px-3 py-2">
+          <div className="font-mono text-xs text-zinc-700 break-all">
+            {runCommand()}
+            <div className="mt-1 text-zinc-500">the script itself runs: hobees init --config, then {pipeline.join(' ')}</div>
+          </div>
+          <div className="mt-2 text-xs text-zinc-500">
+            The exit code is how a pipeline learns the outcome: 0 completed, 1 failed, 2 stopped for an approval,
+            3 still running. It propagates through `docker run` / `docker compose run` even against a remote
+            daemon. For a detached run, read it with
+            {'docker inspect -f "{{.State.ExitCode}}" <container>'} or `docker compose up --exit-code-from {fields.service}`,
+            or ask the run itself: {`hobees pipeline status --hive ${fields.run_hive || 'the hive'} --json --poll 5 --timeout 60`}.
+            The manifest keeps the same code as `exit_code`.
+          </div>
+          <button
+            type="button"
+            onClick={() => {
+              copyText(runCommand());
+              setOutput('Run command copied');
+            }}
+            className="inline-flex shrink-0 items-center gap-1.5 rounded-lg border border-zinc-200 bg-white px-2.5 py-1.5 text-xs font-medium text-zinc-700 hover:bg-zinc-50"
+          >
+            <Copy className="h-3.5 w-3.5" />
+            Copy
+          </button>
+        </div>
       </div>
 
       <label className="flex items-center gap-2 text-xs text-zinc-600">
@@ -806,10 +962,27 @@ function ContainersTab({ readOnly }: { readOnly: boolean }) {
         </Field>
       </div>
 
+      <div className="grid grid-cols-1 gap-3 lg:grid-cols-2">
+        <Field label={plan?.config_exists ? 'hobees.yaml (already saved at the project root)' : 'hobees.yaml (the active configuration)'}>
+          <textarea value={config} onChange={(e) => setConfig(e.target.value)} readOnly={readOnly} spellCheck={false} rows={12} className="w-full resize-y rounded-lg border border-zinc-200 bg-zinc-950 p-3 font-mono text-xs leading-relaxed text-zinc-100 focus:outline-none" />
+        </Field>
+        <Field label="docker-entrypoint.sh (init, then the goal)">
+          <textarea value={entrypoint} readOnly spellCheck={false} rows={12} className="w-full resize-y rounded-lg border border-zinc-200 bg-zinc-950 p-3 font-mono text-xs leading-relaxed text-zinc-100 focus:outline-none" />
+        </Field>
+      </div>
+
       <div className="flex flex-wrap items-center gap-2">
         <button type="button" disabled={buildPlan.isPending} onClick={preview} className="inline-flex items-center gap-1.5 rounded-lg border border-zinc-200 bg-white px-3 py-1.5 text-xs font-medium text-zinc-700 hover:bg-zinc-50">
           <Code2 className="h-3.5 w-3.5" />
-          Preview spec
+          {dirty ? 'Update spec (unapplied changes)' : 'Update spec'}
+        </button>
+        <button
+          type="button"
+          onClick={downloadAll}
+          className="inline-flex items-center gap-1.5 rounded-lg border border-zinc-200 bg-white px-3 py-1.5 text-xs font-medium text-zinc-700 hover:bg-zinc-50"
+        >
+          <Download className="h-3.5 w-3.5" />
+          Download all files
         </button>
         <button type="button" disabled={readOnly || saveFiles.isPending} onClick={save} className="inline-flex items-center gap-1.5 rounded-lg bg-zinc-900 px-3 py-1.5 text-xs font-medium text-white hover:bg-zinc-800 disabled:opacity-40">
           <Upload className="h-3.5 w-3.5" />
@@ -823,25 +996,16 @@ function ContainersTab({ readOnly }: { readOnly: boolean }) {
           <Download className="h-3.5 w-3.5" />
           Export Dockerfile
         </button>
+        <button type="button" onClick={() => downloadText(config, 'hobees.yaml', 'text/yaml')} className="inline-flex items-center gap-1.5 rounded-lg border border-zinc-200 bg-white px-3 py-1.5 text-xs font-medium text-zinc-700 hover:bg-zinc-50">
+          <Download className="h-3.5 w-3.5" />
+          Export hobees.yaml
+        </button>
+        <button type="button" onClick={() => downloadText(entrypoint, 'docker-entrypoint.sh', 'text/plain')} className="inline-flex items-center gap-1.5 rounded-lg border border-zinc-200 bg-white px-3 py-1.5 text-xs font-medium text-zinc-700 hover:bg-zinc-50">
+          <Download className="h-3.5 w-3.5" />
+          Export entrypoint
+        </button>
       </div>
 
-      <div className="flex flex-wrap items-center gap-2 border-t border-zinc-100 pt-3">
-        {(['up', 'ps', 'logs', 'down'] as const).map((action) => (
-          <button
-            key={action}
-            type="button"
-            disabled={!canRunContainer || runAction.isPending}
-            onClick={() => run(action)}
-            className="inline-flex items-center gap-1.5 rounded-lg border border-zinc-200 bg-white px-3 py-1.5 text-xs font-medium text-zinc-700 hover:bg-zinc-50 disabled:opacity-40"
-          >
-            {runAction.isPending ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : null}
-            {action === 'up' ? 'Start' : action === 'down' ? 'Stop' : action === 'ps' ? 'Status' : 'Logs'}
-          </button>
-        ))}
-        <span className="text-xs text-zinc-500">
-          {readOnly ? 'Container actions are disabled in --read-only mode.' : 'Only allowlisted docker compose subcommands are run.'}
-        </span>
-      </div>
 
       {output && (
         <pre className="max-h-64 overflow-y-auto rounded-lg border border-zinc-200 bg-zinc-50 p-3 font-mono text-xs whitespace-pre-wrap text-zinc-700">

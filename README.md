@@ -552,6 +552,21 @@ Studio extras:
 
 - **Quick setup** — templates on top, **Reset** below (Reset appears only on this tab). Opening Studio without `?tab=` lands there while nothing is configured, otherwise on Hives. A template lists what it creates and every name it collides with; `Skip existing` is the default, and a colliding template needs a typed `Y (yes)` before `POST /api/v1/templates/apply` runs. `GET /api/v1/templates` reports the plan and collisions.
 - **Detect providers** (Providers tab) — scans env keys (`OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, `GEMINI_API_KEY`, `OPENROUTER_API_KEY`, `DEEPSEEK_API_KEY`) and probes `11434` (Ollama), `8080` (llama-server), `1234` (LM Studio); you then register only the candidates you tick. Detection itself writes nothing.
+- **Containers** — the tab generates the whole deployable set from what you are happy with now:
+  `compose.yaml`, `Dockerfile`, `hobees.yaml` (the active configuration), `goal.txt` and
+  `docker-entrypoint.sh`. The `Dockerfile` follows the repo one — `uv tool install hobees` from
+  PyPI, no source tree in the image — and the entrypoint initializes the schema with the copied
+  config, then runs the goal. The goal reaches the container as a **read-only mount** (default, so
+  the goal can change per run without a rebuild), a **baked `COPY`** (opt-in), or **stdin**, and the
+  prompt text is never written into the script, so it can never be read as shell. Running the web
+  app inside the container is optional and stays commented out by default. Generated paths are
+  relative (`./artifacts`, `./skills`, `./goal.txt`) and the container name is read at run time,
+  so nothing from one machine is baked into a committed file. Env values stay `${NAME}` references.
+  There is no `CMD` in the generated `Dockerfile`: the entrypoint script is the single place that
+  decides (init, then the goal), so a baked command line would duplicate it. The tab **only writes
+  files** — nothing in it starts or stops a container, so the shown `docker compose run …` command is
+  for you or CI to execute. A field change reaches the files only when you click **Update spec**, and
+  **Download all files** gives each file as its own download (not a pack).
 
 Read-only mode blocks every mutating call, destructive actions require a typed `Y (yes)`, and reset accepts requests from the origin it serves. `hobees reset` from a terminal is the same two scopes (`~/.hobees` config + `--all` for generated output).
 
@@ -750,20 +765,80 @@ docker compose run --rm hobees hive list
 docker compose run --rm hobees hive run research-team "Summarize the project plan" --json
 ```
 
+The generated set runs a goal from a file or a pipe, which is what a pipeline wants:
+
+```bash
+# read-only mount (default): change the goal without rebuilding the image
+docker compose run --rm --profile pipeline init
+printf '%s' "Review src/ for race conditions" | docker compose run -T --rm --profile pipeline hobees run --hive dev-team -
+docker compose run --rm --profile pipeline hobees run --hive dev-team --goal-file /data/goal.txt --json
+
+# baked mode: the image is runnable on its own, but the goal is frozen in a layer
+docker compose run --rm --profile pipeline hobees   # entrypoint: init, then the goal file
+```
+
+### How a pipeline knows the run ended
+
+Nothing has to be added to the `Dockerfile` for this: hobees already exits with a meaningful code, and
+that code is the container's exit code. `docker run` and `docker compose run` hand it back to the
+caller, and that stays true when the container runs against a remote daemon (`DOCKER_HOST`,
+`docker -H ssh://pipeline-host` or `docker -H tcp://host:2376`) - the CLI's own exit status is the
+container's, so a CI step can simply test `$?` or `if ! docker compose run ...; then exit 1; fi`.
+
+| Code | Meaning |
+| --- | --- |
+| 0 | completed |
+| 1 | failed (error, timeout, bad config) |
+| 2 | stopped for an approval a headless run cannot answer |
+| 3 | still running (a status read that has not reached a terminal state) |
+
+The generated `docker-entrypoint.sh` keeps that path intact: `set -eu` stops on the first failure with
+that command's code, and `exec` replaces the shell so hobees' exit code is reported unchanged.
+
+A detached run has to read the code back:
+
+```bash
+docker compose run --rm --profile pipeline hobees            # exit status == the container's
+docker compose up -d --profile pipeline                      # detached: inspect afterwards
+docker inspect -f "{{.State.ExitCode}}" <container>
+docker compose up --exit-code-from hobees --profile pipeline # compose exits with the service's code
+```
+
+`hobees pipeline status` is the richer reading of the same outcome. It reads the manifest the run wrote
+into the artifacts mount, or the run row, prints status/error, and exits with the matching code - which
+is what a pipeline manager wants when the container ran on another host and only the mounted artifacts
+come back:
+
+```bash
+hobees pipeline status --hive dev-team --json                  # status, error, exit_code, thread
+hobees pipeline status --hive dev-team --poll 5 --timeout 120  # wait for a terminal state
+hobees pipeline status --thread-id 91318583
+```
+
+Every manifest entry now carries `exit_code`, so the two signals cannot disagree: the shell sees the
+number, and the JSON says the same number with the reason attached.
+The run writes the manifest to its artifacts directory and the run row to the database, so a pipeline
+manager on a different host has three ways to learn the outcome: the exit code from the `docker` call
+(it propagates over a remote daemon), the manifest through a shared mount, or the database row - the
+last two are what `hobees pipeline status` reads. Point `--manifest` at the shared path, or use
+`--hive`/`--thread-id` when the pipeline shares the same PostgreSQL.
+
+
 The `./artifacts` bind mount makes run outputs available on the host (worker-created files are under `artifacts/<hive>/output/`), and `./skills` persists Markdown skill files. The named `postgres_data` volume preserves providers, Bees, Hives, runs, memories, and checkpoints across container recreation and `docker compose down`. Remove the corresponding volume mappings from `compose.yaml` if persistence is not wanted. **`docker compose down -v` deletes the database volume and its contents.**
 
 A one-shot container is headless, so the approval default there is `strict`: a gated tool does not run unless the container sets `HOBEES_APPROVAL_MODE=auto` (or `pause`) in `.env` or passes `--approval-mode`. Container identity is `HOBEES_CONTAINER_NAME` if set, otherwise `HOSTNAME` (Docker's 12-char container id), so parallel workers using the same `hobees.yaml` write distinct thread keys — `worker-1:hive:...` vs `worker-2:hive:...` — and each run can be inspected from any other container with `hobees trace --container <name> --thread <id>`.
 
 To load declarative setup, uncomment the optional `./config:/config:ro` mount in `compose.yaml`, set `HOBEES_CONFIG_PATH=/config/hobees.yaml` in `.env`, and place the config file in `./config`. You can instead run a one-time import with `docker compose run --rm hobees init --config /config/hobees.yaml`.
 
-The web UI's **Studio → Containers** tab prepares that deployment from the browser: it builds a
-`compose.yaml` and a `Dockerfile` from the live settings and the registered providers, shows
-validation warnings, and can save the two files to the project root (`HOBEES_PROJECT_ROOT`,
-fixed names) or export them for download. `Start`, `Status`, `Logs` and `Stop` run only the
-allowlisted `docker compose` subcommands (`up`, `down`, `ps`, `logs`) with fixed arguments —
-no shell, no arbitrary args — and they are disabled in `--read-only` mode or when `docker` is
-not installed. Generated files reference environment variables by name (`${OPENAI_API_KEY}`),
-never by value, and the generated Dockerfile runs as a non-root user with `uv sync --no-dev`.
+The web UI's **Studio → Containers** tab prepares that deployment from the browser: it builds the
+`compose.yaml`, `Dockerfile`, `hobees.yaml`, `goal.txt` and `docker-entrypoint.sh` from the live
+settings and the registered providers, shows validation warnings, and can save them to the project
+root (`HOBEES_PROJECT_ROOT`, fixed names) or download each file separately. The tab does not start or
+stop containers — `docker` and `docker compose` are run by you or by CI. The `Dockerfile` installs
+`hobees` from PyPI (`uv tool install hobees`), has no source tree in the image, and defines no `CMD`:
+`docker-entrypoint.sh` is what runs, initializing hobees with the copied config and then running the
+goal, with arguments passed to `docker compose run` as the override. Generated files reference
+environment variables by name (`${OPENAI_API_KEY}`), never by value, and run as a non-root user.
 
 Provider API keys are passed into the runtime container from `.env`; they are not baked into the image. Add any custom API-key environment variables used by your providers to `.env`. The app container runs as the numeric user configured by `HOBEES_UID` and `HOBEES_GID` so it can write to the artifacts and skills bind mounts.
 

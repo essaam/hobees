@@ -15,7 +15,7 @@ def test_safe_path_component_replaces_windows_reserved_characters():
 
 
 def test_trace_filename_uses_the_same_safe_component():
-    key = "shaapc:hive:dev-team:91318583"
+    key = "worker-1:hive:dev-team:91318583"
     assert trace_filename(key) == f"{safe_path_component(key)}.jsonl"
     assert ":" not in trace_filename(key)
     assert ":" not in safe_path_component(key)

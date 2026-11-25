@@ -81,12 +81,12 @@ The production Docker image is built with `uv sync --no-dev`, so it does not
 include pytest. Run tests from the development checkout with `uv run pytest`.
 This repository does not define a development Docker image.
 
-The Studio **Containers** tab prepares that deployment from the running settings:
-it generates `compose.yaml` and `Dockerfile`, can save them to the project root
-(`HOBEES_PROJECT_ROOT`, fixed file names) or export them, and can run the
-allowlisted `docker compose up|down|ps|logs` actions. Environment values stay as
-`${NAME}` references, so generated files never contain a key, and the actions are
-blocked in `--read-only` mode or when `docker` is not installed.
+The Studio **Containers** tab prepares that deployment from the running settings: it generates the
+deployable set (`compose.yaml`, `Dockerfile`, `hobees.yaml`, `goal.txt`, `docker-entrypoint.sh`),
+can save the files to the project root (`HOBEES_PROJECT_ROOT`, fixed names) or download them one
+by one, and it does nothing else - nothing in hobees runs `docker` from the browser.
+Environment values stay as `${NAME}` references, so generated files never contain a key, and the
+write is blocked in `--read-only` mode.
 
 Keep `./artifacts` and `./skills` mounted when testing features that write files. On Linux, set `HOBEES_UID` and `HOBEES_GID` in `.env` to match the host user (`id -u`, `id -g`) so bind mounts remain writable.
 
@@ -109,10 +109,27 @@ Keep `./artifacts` and `./skills` mounted when testing features that write files
   `strict` resolves them by rejection without prompting, by design.
 - Container preparation (Studio Containers tab) generates `compose.yaml` and `Dockerfile`
   from the live settings/providers. Generated files reference environment variables **by
-  name** (`${NAME}`), never literal secret values, and the web layer runs only allowlisted
-  `docker compose` subcommands (`up`, `down`, `ps`, `logs`) with fixed argv — no shell, no
-  arbitrary arguments. `hobees.core.container_prep.ALLOWED_ACTIONS`, the endpoint check and
-  `tests/test_container_prep.py` must agree.
+  name** (`${NAME}`), never literal secret values, and no `docker` command is executed by the
+  web layer: the tab writes files and the pipeline (or a person) runs them. The **exit code** is
+  the pipeline's signal - 0 completed, 1 failed, 2 stopped for an approval a headless run cannot
+  answer, 3 still running - so `docker-entrypoint.sh` must keep `set -eu` and the final `exec`,
+  and `hobees.core.pipeline_status.STATUS_EXIT_CODES`, the manifest `exit_code`,
+  `hobees pipeline status`, the entrypoint comment and `tests/test_pipeline_status.py` must agree.
+  A run that ends awaiting approval must not exit 0. The Containers tab generates the deployable set
+  from the active configuration (`compose.yaml`, `Dockerfile`, `hobees.yaml`, `goal.txt`,
+  `docker-entrypoint.sh`): the entrypoint runs `hobees init --config` first, then the goal. The
+  goal text is only ever written to its own file or read from stdin - it is never interpolated
+  into the script - and `save_project_files()` takes plain validated file names inside the
+  project root. `GOAL_MODES` (`mount` default, `bake`, `stdin`) must stay in sync with the
+  generated command, the volume mount, and `tests/test_container_prep.py` / `tests/test_web.py`.  The `Dockerfile` generator must stay in step with the repo `Dockerfile` (PyPI install via
+  `uv tool install hobees`, no source tree in the image) and `DEFAULT_WORKING_DIR` must stay equal to
+  its `WORKDIR`. Generated paths are relative to the project root and run-time names are used
+  (`CONTAINER_NAME_PLACEHOLDER`) so a machine-specific path or host name can never be written into a
+  committed file; the web service is optional and commented out unless `include_web` is set.
+  The generator writes no `CMD` and no default compose `command`: `docker-entrypoint.sh` is the only
+  place that decides what runs, and `spec.command` is an explicit override. The Containers tab is
+  file-generation only - it must not offer to start or stop a container - and a field change reaches
+  the files only through Update spec.
 - An import writes by name, so `hobees import` and the Studio templates panel share
   `cli/import_cmd.CONFLICT_MODES` (`skip` | `overwrite`): `analyze_config_conflicts()` is
   the single source for what already exists, `overwrite` stays the CLI default, the web

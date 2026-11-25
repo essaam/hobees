@@ -45,11 +45,43 @@ to a heading matching that version and add the release date.
   collision before anything is written; the CLI and the web template panel share one
   conflict analysis (`analyze_config_conflicts()`). A skipped hive or skill keeps its bee
   roster and assignments too.
+- Web UI: the Studio **Containers** tab generates the whole deployable set from the active
+  configuration: `compose.yaml`, `Dockerfile`, `hobees.yaml`, `goal.txt` and
+  `docker-entrypoint.sh`. The entrypoint initializes the schema with the copied config and then
+  runs the goal. The goal reaches the container as a read-only mount (default), a baked `COPY`
+  (opt-in) or stdin, and the prompt text is never written into the script, so it cannot be read
+  as shell. Save/export covers all five files, the tab shows the pipeline command, and the plan
+  response reports the generated contents plus which files already exist at the project root.  The `Dockerfile` now mirrors the repo one (`uv tool install hobees` from PyPI, no source tree in
+  the image), paths are relative to the project root, the container name is read at run time instead
+  of baking the host name in, running the web app inside the container is optional and commented out
+  by default, and the shown pipeline command follows the settings in the panel.  The generated `Dockerfile` no longer bakes a `CMD`: the entrypoint script decides what runs, so the
+  command line duplicated it (the reason is written as a comment in the generated file), and compose
+  writes `command` only for an explicit override. The Containers tab is file-generation only - the
+  start/stop/status/logs section is gone - a field change reaches the files only after clicking
+  **Update spec**, and **Download all files** gives each file as its own download rather than a pack.
+- CLI: `hobees pipeline status` reports how a run ended for a pipeline manager - the manifest entry or
+  the run row, with status, error and the exit code to act on - and can wait for a terminal state with
+  `--poll`/`--timeout`. Run manifests now carry `exit_code`, so the shell signal and the JSON cannot
+  disagree. Codes: 0 completed, 1 failed, 2 stopped for an approval a headless run cannot answer,
+  3 still running. The generated entrypoint keeps the path intact (`set -eu`, then `exec`), so nothing
+  between hobees and the container's exit code can swallow it, and a remote daemon still reports the
+  container's code to the caller.
 - Core: detection defaults now include **DeepSeek** (`DEEPSEEK_API_KEY`,
   `https://api.deepseek.com/v1`).
+- CLI: `hobees run`, `hobees prompt` and `hobees hive run` accept `--goal-file <path>`
+  and `-`/piped stdin, in that precedence order (argument > file > stdin). A long prompt is
+  carried by a file or a pipe rather than shell quoting or an environment variable, which is
+  what makes a container/CI step readable. With no goal supplied the command exits with the
+  usable ways to give one; `prompt`'s `--goal-file` sits last in the signature so existing
+  positional calls keep working.
 
 ### Changed
 
+- Web UI: the Studio Containers tab no longer runs `docker`. `POST /api/v1/containers/action`, the
+  `up|down|ps|logs` allowlist and `run_compose()` are gone: the tab writes the generated files, and the
+  pipeline (or a person) executes them, so the code stays the signal.
+- CLI: `hobees run` and `hobees hive run` exit **2** when the run stops for an approval instead of
+  looking successful with 0.
 - CLI: the Web UI default port is now **6543** (`hobees web` without `--port`, and the
   `web-ui` dev-server proxy target follows it). `hobees serve` stays on 8420, and port
   8080 is still the llama-server detection default — the two are unrelated.
@@ -63,6 +95,13 @@ to a heading matching that version and add the release date.
   fail with `WinError 32` on Windows. A file held open by another process is still
   reported rather than forced, and the CLI now names the paths left behind instead of
   claiming the slate is clean.
+- Fixed: the generated Dockerfile installed the project from source instead of PyPI, published
+  `8420` instead of the new `6543` default, and wrote `./C:/Users/...:/data/skills` for an absolute
+  settings path (and the host name for `container_name`) — generated files now use relative paths
+  and run-time names. `save_project_files()` takes the full generated set with validated plain file
+  names, the goal mount is no longer duplicated when volumes are set, and the Containers tab refreshes
+  the run command, config, entrypoint and goal when the settings change instead of showing the first
+  plan.
 
 ### Fixed
 

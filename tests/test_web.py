@@ -89,15 +89,6 @@ def test_container_plan_and_files_endpoints(web_env, monkeypatch):
     assert (tmp_path / "Dockerfile").is_file()
     assert any("literal value" in warning for warning in saved.json()["warnings"])
 
-    rejected = client.post("/api/v1/containers/action", json={"action": "exec"})
-    assert rejected.status_code == 400
-    assert "must be one of" in rejected.json()["detail"]
-
-    unavailable = client.post("/api/v1/containers/action", json={"action": "ps"})
-    assert unavailable.status_code == 200
-    assert unavailable.json()["success"] is False
-    assert "docker is not available" in unavailable.json()["detail"]
-    assert unavailable.json()["command"] == ["docker", "compose", "-f", "compose.yaml", "ps"]
 
     # Files must land inside the project root, whatever the request claims.
     outside = client.post(
@@ -715,3 +706,73 @@ def test_reset_deletes_a_database_file_inside_the_config_folder(web_env, monkeyp
     assert removed["success"] and str(db_file) in removed["removed"]
     assert not db_file.exists()
     assert removed["restart_required"]
+
+def test_container_plan_reports_the_generated_set_and_saves_it(web_env, monkeypatch):
+    tmp_path, _ = web_env
+    monkeypatch.setenv("HOBEES_PROJECT_ROOT", str(tmp_path))
+    monkeypatch.setattr("hobees.core.container_prep.shutil.which", lambda _name: None)
+
+    client = TestClient(create_web_app())
+    plan = client.get("/api/v1/containers/plan").json()
+
+    assert plan["config"]
+    assert plan["entrypoint"].startswith("#!/bin/sh")
+    assert "hobees init --config" in plan["entrypoint"]
+    assert plan["pipeline_command"] == ["run", "--goal-file", "/data/goal.txt", "--json"]
+    assert "./goal.txt:/data/goal.txt:ro" in plan["compose"]
+    assert any("no goal set" in warning for warning in plan["warnings"])
+
+    baked = client.post(
+        "/api/v1/containers/plan",
+        json={"goal": "Review src/", "goal_mode": "bake", "run_hive": "dev-team"},
+    ).json()
+    assert "COPY --chown=hobees:hobees goal.txt /data/goal.txt" in baked["dockerfile"]
+    assert baked["pipeline_command"] == ["run", "--hive", "dev-team", "--goal-file", "/data/goal.txt", "--json"]
+
+    # A prompt that looks like shell stays text: it is only ever written to the goal file.
+    injection = client.post(
+        "/api/v1/containers/plan",
+        json={"goal": "`whoami`; $(id)", "goal_mode": "mount"},
+    ).json()
+    assert "whoami" not in injection["entrypoint"]
+
+    saved = client.post(
+        "/api/v1/containers/files",
+        json={
+            "compose": "services:\n  app:\n    build: .",
+            "dockerfile": "FROM python:3.12-slim",
+            "config": "providers: []",
+            "entrypoint": "#!/bin/sh\nset -eu",
+            "goal": "Review src/",
+        },
+    )
+    assert saved.status_code == 200
+    names = {Path(item).name for item in saved.json()["saved"]}
+    assert names == {"compose.yaml", "Dockerfile", "hobees.yaml", "docker-entrypoint.sh", "goal.txt"}
+
+    # stdin mode has no goal file to write.
+    stdin_saved = client.post(
+        "/api/v1/containers/files",
+        json={
+            "compose": "services:\n  app:\n    build: .",
+            "dockerfile": "FROM python:3.12-slim",
+            "config": "providers: []",
+            "entrypoint": "#!/bin/sh\nset -eu",
+            "goal": "piped goal",
+            "spec": {"goal_mode": "stdin", "goal": "piped goal"},
+        },
+    ).json()
+    assert "goal.txt" not in {Path(item).name for item in stdin_saved["saved"]}
+
+    # Generation only: no docker action route exists, so such a request can only
+    # reach the SPA catch-all.
+    paths = client.get("/openapi.json").json()["paths"]
+    assert not any("containers/action" in path for path in paths)
+
+
+def test_container_plan_flags_an_empty_active_config(web_env, monkeypatch):
+    tmp_path, _ = web_env
+    monkeypatch.setenv("HOBEES_PROJECT_ROOT", str(tmp_path))
+    client = TestClient(create_web_app())
+    plan = client.get("/api/v1/containers/plan").json()
+    assert any("active configuration is empty" in warning for warning in plan["warnings"])

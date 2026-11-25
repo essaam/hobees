@@ -13,7 +13,7 @@ from hobees.core.tool_registry import (
 def test_offloaded_output_can_be_read_back_with_the_path_the_model_was_shown(tmp_path):
     long_output = "Z" * (MAX_TOOL_OUTPUT_CHARS + 300)
     (tmp_path / "seed.txt").write_text(long_output, encoding="utf-8")
-    thread_key = "shaapc:hive:dev-team:91318583"
+    thread_key = "worker-1:hive:dev-team:91318583"
 
     set_thread_context(thread_key, call_id="call_7", project_root=str(tmp_path))
     preview = TOOL_REGISTRY["read_file"].invoke({"path": "seed.txt"})
@@ -25,7 +25,7 @@ def test_offloaded_output_can_be_read_back_with_the_path_the_model_was_shown(tmp
     again = TOOL_REGISTRY["read_file"].invoke({"path": shown})
     assert not again.startswith("ERROR:")
     assert again.startswith("ZZZ")
-    saved = tmp_path / "scratchpad" / "shaapc__hive__dev-team__91318583" / "call_7.txt"
+    saved = tmp_path / "scratchpad" / "worker-1__hive__dev-team__91318583" / "call_7.txt"
     assert saved.read_text(encoding="utf-8") == long_output
 
 

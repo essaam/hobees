@@ -26,6 +26,7 @@ from hobees.cli.bee_cmd import app as bee_app
 from hobees.cli.hive_cmd import app as hive_app
 from hobees.cli.provider_cmd import app as provider_app
 from hobees.cli.memory_cmd import app as memory_app
+from hobees.cli.pipeline_cmd import app as pipeline_app
 from hobees.cli.reset_cmd import reset_command
 from hobees.cli.skill_cmd import app as skill_app
 from hobees.cli.import_cmd import import_config
@@ -42,6 +43,7 @@ app.add_typer(bee_app, name="bee")
 app.add_typer(hive_app, name="hive")
 app.add_typer(memory_app, name="memory")
 app.add_typer(skill_app, name="skill")
+app.add_typer(pipeline_app, name="pipeline")
 # `/approvals` on the interactive side, `hobees approvals` headless; `permissions`
 # is accepted as an alias of both.
 app.command(name="approvals")(approvals_command)
@@ -862,17 +864,29 @@ def web(
 
 @app.command()
 def prompt(
-    goal: str = typer.Argument(..., help="Goal to execute in single-shot print mode"),
+    goal: str = typer.Argument(
+        None,
+        help="Goal to execute in single-shot print mode, or `-` to read it from stdin",
+    ),
     provider: str = typer.Option(None, "--provider", help="Provider alias to use"),
     model: str = typer.Option(None, "--model", help="Model name to use"),
     thinking: str = typer.Option("medium", "--thinking", help="Thinking level: off, low, medium, high"),
     approval_mode: str = typer.Option(None, "--approval-mode", help="interactive|auto|strict|pause"),
+    # Last, so `prompt(goal, provider, model, thinking)` positional calls keep working.
+    goal_file: str = typer.Option(None, "--goal-file", help="Read the goal from a file (or - for stdin)"),
 ) -> None:
-    """Execute a single goal non-interactively and exit (`-p` alias)."""
+    """Execute a single goal non-interactively and exit (`-p` alias).
+
+    The goal may also arrive from `--goal-file <path>` or a pipe, which is what makes
+    a container/CI step readable when the prompt is long.
+    """
+    from hobees.cli.goal_input import require_goal, resolve_goal
     from hobees.db.session import get_engine, session_scope
     from hobees.db.models import LLMProvider, Bee, Hive, HiveMembership, Run
     from hobees.core.hive_builder import hive_app
     from hobees.cli.approval_cmd import normalize_level
+
+    goal = require_goal(resolve_goal(goal, goal_file))
 
     # Only a real level string is trusted; anything else falls back to the
     # context default inside the graph.
@@ -965,6 +979,10 @@ def prompt(
             )
         output = str(result)
         messages = result.get("messages", []) if isinstance(result, dict) else []
+        # An approval interrupt means the goal was not finished - a headless run cannot answer it,
+        # so the pipeline must see a non-zero code instead of a plain "completed".
+        interrupts = result.get("__interrupt__", []) if isinstance(result, dict) else []
+        status = "awaiting_approval" if interrupts else "completed"
         memory_output = (
             str(getattr(messages[-1], "content", messages[-1]))
             if messages
@@ -973,7 +991,7 @@ def prompt(
         with session_scope() as session:
             run = session.get(Run, run_id)
             if run:
-                run.status = "completed"
+                run.status = status
                 run.completed_at = datetime.now(timezone.utc)
         from hobees.core.memory_manager import extract_run_memories
 
@@ -989,6 +1007,11 @@ def prompt(
         from hobees.core.skill_harvester import harvest_completed_run
 
         skill_draft = harvest_completed_run(run_id)
+        if status != "completed":
+            console.print(f"{WARN} Goal stopped for approval ({len(interrupts)} pending decision(s))")
+            from hobees.core.pipeline_status import pipeline_exit_code
+
+            raise typer.Exit(code=pipeline_exit_code(status))
         console.print(f"{SUCCESS} Goal completed:")
         console.print(output)
         if skill_draft:
@@ -1019,7 +1042,10 @@ def prompt(
 
 @app.command(name="run")
 def run_cmd(
-    goal: Annotated[str, typer.Argument(help="Goal/instruction to execute")],
+    goal: Annotated[
+        str | None,
+        typer.Argument(help="Goal/instruction to execute, or `-` to read stdin"),
+    ] = None,
     hive: Annotated[str | None, typer.Option("--hive", "-h", help="Specific hive name to run")] = None,
     provider: Annotated[str | None, typer.Option("--provider", help="Provider alias (for auto-mode)")] = None,
     model: Annotated[str | None, typer.Option("--model", help="Model name (for auto-mode)")] = None,
@@ -1030,15 +1056,27 @@ def run_cmd(
     artifacts_dir: Annotated[str | None, typer.Option("--artifacts-dir", help="Directory for hive outputs")] = None,
     approval_mode: Annotated[str | None, typer.Option("--approval-mode", help="interactive|auto|strict|pause")] = None,
     auto_approve: Annotated[bool, typer.Option("--auto-approve", help="Convenience alias for --approval-mode auto")] = False,
+    goal_file: Annotated[
+        str | None,
+        typer.Option("--goal-file", help="Read the goal from a file (or - for stdin)"),
+    ] = None,
 ) -> None:
-    """Execute a goal non-interactively (headless / CI/CD mode)."""
+    """Execute a goal non-interactively (headless / CI/CD mode).
+
+    A long prompt is better carried by a file or a pipe than by shell quoting, so
+    `--goal-file goal.txt`, `hobees run - < goal.txt`, and `hobees run "short goal"`
+    all work; the goal argument wins over the file, the file over piped stdin.
+    """
+    from hobees.cli.goal_input import require_goal, resolve_goal
+
+    goal_text = require_goal(resolve_goal(goal, goal_file))
     level = _approval_session_level(approval_mode, auto_approve)
     if hive:
         from hobees.cli.hive_cmd import cmd_hive_run
 
         cmd_hive_run(
             hive_name=hive,
-            goal=goal,
+            goal=goal_text,
             output_json=output_json,
             quiet=quiet,
             timeout=timeout,
@@ -1047,7 +1085,7 @@ def run_cmd(
             approval_mode=level,
         )
     else:
-        prompt(goal=goal, provider=provider, model=model, thinking=thinking, approval_mode=level)
+        prompt(goal=goal_text, provider=provider, model=model, thinking=thinking, approval_mode=level)
 
 
 @app.command(name="shell")

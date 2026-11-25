@@ -8,6 +8,7 @@ import type {
   ProviderModelTestRequest,
   ProviderUpdate,
   ReplayRequest,
+  ContainerSaveRequest,
 } from '../types';
 
 export function useStatus() {
@@ -44,15 +45,8 @@ export function useBuildContainerPlan() {
 export function useSaveContainerFiles() {
   const qc = useQueryClient();
   return useMutation({
-    mutationFn: (body: { compose: string; dockerfile: string }) => api.saveContainerFiles(body),
+    mutationFn: (body: ContainerSaveRequest) => api.saveContainerFiles(body),
     onSuccess: () => qc.invalidateQueries({ queryKey: ['containers', 'plan'] }),
-  });
-}
-
-export function useRunContainerAction() {
-  return useMutation({
-    mutationFn: (body: { action: string; service?: string; detach?: boolean; tail?: number }) =>
-      api.runContainerAction(body),
   });
 }
 
