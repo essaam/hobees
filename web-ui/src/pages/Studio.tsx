@@ -659,6 +659,7 @@ function ContainersTab({ readOnly }: { readOnly: boolean }) {
     volumes: './artifacts:/data/artifacts, ./skills:/data/skills',
     command: '',
     include_db: true,
+    postgres_service_name: 'postgres',
     run_hive: '',
     goal: '',
     goal_mode: 'mount' as ContainerSpec['goal_mode'],
@@ -670,6 +671,7 @@ function ContainersTab({ readOnly }: { readOnly: boolean }) {
   const [config, setConfig] = useState('');
   const [entrypoint, setEntrypoint] = useState('');
   const [pipeline, setPipeline] = useState<string[]>([]);
+  const [envSample, setEnvSample] = useState('');
   const [warnings, setWarnings] = useState<string[]>([]);
   const [output, setOutput] = useState('');
   const synced = useRef('');
@@ -684,6 +686,7 @@ function ContainersTab({ readOnly }: { readOnly: boolean }) {
     setConfig(plan.config);
     setEntrypoint(plan.entrypoint);
     setPipeline(plan.pipeline_command);
+    setEnvSample(plan.env_sample);
     setWarnings(plan.warnings);
     setFields((prev) => {
       const next = {
@@ -697,6 +700,7 @@ function ContainersTab({ readOnly }: { readOnly: boolean }) {
         volumes: plan.spec.volumes.join(', '),
         command: plan.spec.command.join(' '),
         include_db: plan.spec.include_db,
+        postgres_service_name: plan.spec.postgres_service_name,
         run_hive: plan.spec.run_hive,
         goal: plan.spec.goal,
         goal_mode: plan.spec.goal_mode,
@@ -730,6 +734,7 @@ function ContainersTab({ readOnly }: { readOnly: boolean }) {
     include_db: fields.include_db,
     db_image: plan?.spec.db_image ?? 'postgres:16-alpine',
     db_volume: plan?.spec.db_volume ?? 'postgres_data',
+    postgres_service_name: fields.postgres_service_name,
     config_file: plan?.spec.config_file ?? 'hobees.yaml',
     goal: fields.goal,
     goal_file: plan?.spec.goal_file ?? 'goal.txt',
@@ -753,6 +758,7 @@ function ContainersTab({ readOnly }: { readOnly: boolean }) {
       setDockerfile(res.dockerfile);
       setConfig(res.config);
       setEntrypoint(res.entrypoint);
+      setEnvSample(res.env_sample);
       setPipeline(res.pipeline_command);
       setWarnings(res.warnings);
     } catch (err) {
@@ -769,6 +775,7 @@ function ContainersTab({ readOnly }: { readOnly: boolean }) {
         config,
         entrypoint,
         goal: fields.goal_mode === 'stdin' ? '' : fields.goal,
+        env_sample: envSample,
         spec: spec(),
       });
       setOutput(`Saved ${res.saved.join(', ') || 'nothing (empty content was skipped)'}`);
@@ -784,6 +791,7 @@ function ContainersTab({ readOnly }: { readOnly: boolean }) {
     { name: 'Dockerfile', content: dockerfile, mime: 'text/plain' },
     { name: 'hobees.yaml', content: config, mime: 'text/yaml' },
     { name: 'docker-entrypoint.sh', content: entrypoint, mime: 'text/plain' },
+    { name: '.env.sample', content: envSample, mime: 'text/plain' },
     { name: 'goal.txt', content: fields.goal_mode === 'stdin' ? '' : fields.goal, mime: 'text/plain' },
   ];
 
@@ -828,6 +836,9 @@ function ContainersTab({ readOnly }: { readOnly: boolean }) {
         </Field>
         <Field label="Ports (comma-separated)">
           <input value={fields.ports} onChange={(e) => setFields((prev) => ({ ...prev, ports: e.target.value }))} readOnly={readOnly} className="w-full rounded-lg border border-zinc-200 px-3 py-2 font-mono text-xs" />
+        </Field>
+        <Field label="Postgres service name (the compose key and the host the container resolves)">
+          <input value={fields.postgres_service_name} onChange={(e) => setFields((prev) => ({ ...prev, postgres_service_name: e.target.value }))} readOnly={readOnly} className="w-full rounded-lg border border-zinc-200 px-3 py-2 font-mono text-xs" />
         </Field>
         <Field label="Volumes (host:container, comma-separated)">
           <input value={fields.volumes} onChange={(e) => setFields((prev) => ({ ...prev, volumes: e.target.value }))} readOnly={readOnly} className="w-full rounded-lg border border-zinc-200 px-3 py-2 font-mono text-xs" />
@@ -968,6 +979,9 @@ function ContainersTab({ readOnly }: { readOnly: boolean }) {
         </Field>
         <Field label="docker-entrypoint.sh (init, then the goal)">
           <textarea value={entrypoint} readOnly spellCheck={false} rows={12} className="w-full resize-y rounded-lg border border-zinc-200 bg-zinc-950 p-3 font-mono text-xs leading-relaxed text-zinc-100 focus:outline-none" />
+        </Field>
+        <Field label={plan?.env_sample_exists ? '.env.sample (already saved at the project root)' : '.env.sample (keys the generated files read, no values)'}>
+          <textarea value={envSample} onChange={(e) => setEnvSample(e.target.value)} readOnly={readOnly} spellCheck={false} rows={12} className="w-full resize-y rounded-lg border border-zinc-200 bg-zinc-950 p-3 font-mono text-xs leading-relaxed text-zinc-100 focus:outline-none" />
         </Field>
       </div>
 
@@ -1627,6 +1641,23 @@ function DialogShell({
 /** Model picker shared by the Provider, Bee and Hive dialogs: the list comes
  * from provider model auto-detection, a custom name can still be typed, and the
  * selected model can be health-checked with one minimal completion. */
+/** The model a form stores: what was chosen, otherwise what the provider reports - the same
+    order ModelPicker displays and the API resolves, so a model visible on screen can never be
+    missing from the row being saved. */
+
+const detectedCache: Record<string, string[]> = {};
+
+function pickModel(requested: string, provider: Provider | null, detected?: string[]): string {
+  return (
+    requested.trim() ||
+    provider?.default_model ||
+    provider?.assistant_model ||
+    detected?.[0] ||
+    provider?.available_models?.[0] ||
+    ''
+  );
+}
+
 function ModelPicker({
   label,
   value,
@@ -1648,6 +1679,17 @@ function ModelPicker({
   const key = provider?.alias ?? '__unsaved__';
   const models = detected[key] ?? provider?.available_models ?? [];
 
+  /* Whatever the picker shows must be the value the form holds. The select displays the
+     first available model when the caller has none, so saving said "no model" and Test
+     model stayed disabled while one looked chosen - models found by this probe live only
+     here, so they have to be handed back to the form. */
+  useEffect(() => {
+    if (value) return;
+    const shown = provider?.default_model ?? provider?.assistant_model ?? models[0] ?? '';
+    if (shown) onChange(shown);
+  }, [value, provider, models, onChange]);
+
+
   const config = {
     provider_type: provider?.provider_type ?? inlineConfig?.provider_type ?? '',
     base_url: provider?.base_url ?? inlineConfig?.base_url ?? '',
@@ -1659,6 +1701,8 @@ function ModelPicker({
       provider ? { alias: provider.alias, refresh } : { ...config, refresh },
       {
         onSuccess: (res) => {
+          // Shared so the form can resolve what this probe found.
+          detectedCache[key] = res.models;
           setDetected((prev) => ({ ...prev, [key]: res.models }));
           if (res.models.length === 0 && !value) {
             setTestResult({
@@ -1968,10 +2012,9 @@ function BeeDialog({
 }) {
   const [name, setName] = useState(initial?.name ?? '');
   const [providerId, setProviderId] = useState<number>(initial?.provider_id ?? providers[0]?.id ?? 0);
-  const [modelName, setModelName] = useState(
-    initial?.model_name ?? providers[0]?.default_model ?? '',
-  );
+  const [modelName, setModelName] = useState(initial?.model_name ?? '');
   const selectedProvider = providers.find((p) => p.id === providerId) ?? null;
+  const model = pickModel(modelName, selectedProvider, selectedProvider ? detectedCache[selectedProvider.alias] : undefined);
 
   const chooseProvider = (id: number) => {
     setProviderId(id);
@@ -2009,8 +2052,8 @@ function BeeDialog({
   const submit = async (e: React.FormEvent) => {
     e.preventDefault();
     setErr(null);
-    if (!modelName.trim()) {
-      setErr('Pick or type a model name before saving this Bee.');
+    if (!model) {
+      setErr(`Provider '${selectedProvider?.alias ?? providerId}' reports no model - detect models or type one.`);
       return;
     }
     try {
@@ -2020,7 +2063,7 @@ function BeeDialog({
           role_description: roleDescription.trim(),
           system_prompt: systemPrompt,
           provider_id: providerId,
-          model_name: modelName.trim(),
+          model_name: model,
           temperature: parseFloat(temperature) || 0,
           thinking_level: thinkingLevel,
           tool_names: selectedTools,
@@ -2063,7 +2106,7 @@ function BeeDialog({
               </select>
             </Field>
           </div>
-          <ModelPicker label="Model (auto-detected)" value={modelName} onChange={setModelName} provider={selectedProvider} />
+          <ModelPicker label="Model (auto-detected)" value={model} onChange={setModelName} provider={selectedProvider} />
           <div className="grid grid-cols-2 gap-3">
             <Field label="Temperature">
               <input
@@ -2202,10 +2245,9 @@ function HiveDialog({
   const [providerId, setProviderId] = useState<number>(
     initial?.supervisor_provider_id ?? providers[0]?.id ?? 0,
   );
-  const [modelName, setModelName] = useState(
-    initial?.supervisor_model_name ?? providers[0]?.default_model ?? '',
-  );
+  const [modelName, setModelName] = useState(initial?.supervisor_model_name ?? '');
   const selectedProvider = providers.find((p) => p.id === providerId) ?? null;
+  const model = pickModel(modelName, selectedProvider, selectedProvider ? detectedCache[selectedProvider.alias] : undefined);
 
   const chooseProvider = (id: number) => {
     setProviderId(id);
@@ -2229,8 +2271,8 @@ function HiveDialog({
   const submit = async (e: React.FormEvent) => {
     e.preventDefault();
     setErr(null);
-    if (!modelName.trim()) {
-      setErr('Pick or type a model name before saving this Hive.');
+    if (!model) {
+      setErr(`Provider '${selectedProvider?.alias ?? providerId}' reports no model - detect models or type one.`);
       return;
     }
     try {
@@ -2239,7 +2281,7 @@ function HiveDialog({
           name: name.trim(),
           goal_description: goalDesc.trim() || null,
           supervisor_provider_id: providerId,
-          supervisor_model_name: modelName.trim(),
+          supervisor_model_name: model,
           supervisor_prompt: supPrompt.trim() || null,
           supervisor_thinking_level: thinking,
           is_dynamic: isDynamic,
@@ -2285,7 +2327,7 @@ function HiveDialog({
           </div>
           <ModelPicker
             label="Supervisor Model (auto-detected)"
-            value={modelName}
+            value={model}
             onChange={setModelName}
             provider={selectedProvider}
           />

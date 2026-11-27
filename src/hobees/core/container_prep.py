@@ -31,6 +31,8 @@ DEFAULT_DOCKERFILE = "Dockerfile"
 DEFAULT_ENTRYPOINT_FILE = "docker-entrypoint.sh"
 DEFAULT_CONFIG_FILE = "hobees.yaml"
 DEFAULT_GOAL_FILE = "goal.txt"
+DEFAULT_ENV_SAMPLE_FILE = ".env.sample"
+DEFAULT_ENV_SAMPLE_FILE = ".env.sample"
 
 #: `hobees web` binds 6543 by default, so the container publishes the same port.
 DEFAULT_WORKING_DIR = "/home/hobees"
@@ -50,7 +52,7 @@ DEFAULT_SKILLS_MOUNT = "./skills:/data/skills"
 CONTAINER_NAME_PLACEHOLDER = "${HOBEES_CONTAINER_NAME:-hobees}"
 
 _SERVICE_NAME = re.compile(r"^[a-z0-9][a-z0-9_.-]*$")
-_FILE_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]*$")
+_FILE_NAME = re.compile(r"^\.{0,1}[A-Za-z0-9][A-Za-z0-9_.-]*$")
 _SECRET_LIKE = re.compile(r"(?:api[_-]?key|token|secret|password|credential)", re.IGNORECASE)
 
 
@@ -78,6 +80,8 @@ class ContainerSpec(BaseModel):
     include_db: bool = True
     db_image: str = "postgres:16-alpine"
     db_volume: str = "postgres_data"
+    #: The compose service key and the host name the container resolves; one value, used in both places.
+    postgres_service_name: str = "postgres"
     web_service_name: str = "web"
 
     # --- What the container carries and runs ---
@@ -134,15 +138,15 @@ class ContainerSpec(BaseModel):
         env = dict(self.env)
         env.setdefault("HOBEES_ARTIFACTS_ROOT", "/data/artifacts")
         env.setdefault("HOBEES_SKILLS_DIR", "/data/skills")
-        env.setdefault("HOBEES_CONFIG_PATH", CONFIG_TARGET)
-        env.setdefault("HOBEES_GOAL_FILE", GOAL_TARGET)
+        # HOBEES_CONFIG_PATH and HOBEES_GOAL_FILE are set by the Dockerfile ENV, so they
+        # are not written here as well; the entrypoint script reads them from the env.
         if self.run_hive:
             env.setdefault("HOBEES_RUN_HIVE", self.run_hive)
         if self.include_db:
             env.setdefault(
                 "HOBEES_DATABASE_URL",
-                "postgresql+psycopg://${POSTGRES_USER:-hobees}:${POSTGRES_PASSWORD}"
-                "@db:5432/${POSTGRES_DB:-hobees}",
+                "postgresql+psycopg://${POSTGRES_USER:-hobees}:${POSTGRES_PASSWORD}@"
+                f"{self.postgres_service_name}:5432/${{POSTGRES_DB:-hobees}}",
             )
         for name in self.api_key_envs:
             env.setdefault(name, f"${{{name}}}")
@@ -172,12 +176,13 @@ class ContainerSpec(BaseModel):
 
 def compose_document(spec: ContainerSpec) -> dict[str, Any]:
     service: dict[str, Any] = {
-        "build": {"context": ".", "dockerfile": DEFAULT_DOCKERFILE},
+        # Every host path is relative to the compose file: "./", not a bare name.
+        "build": {"context": ".", "dockerfile": "./" + DEFAULT_DOCKERFILE},
         "image": spec.image,
         "container_name": spec.resolved_container_name(),
         "user": spec.user,
         "working_dir": spec.working_dir,
-        "env_file": [".env"],
+        "env_file": ["./.env"],
         "environment": spec.resolved_env(),
         "volumes": spec.resolved_volumes(),
         "init": True,
@@ -198,7 +203,8 @@ def compose_document(spec: ContainerSpec) -> dict[str, Any]:
     document: dict[str, Any] = {"services": {spec.service: service}}
 
     if spec.include_db:
-        document["services"]["db"] = {            "image": spec.db_image,
+        document["services"][spec.postgres_service_name] = {
+            "image": spec.db_image,
             "environment": {
                 "POSTGRES_DB": "${POSTGRES_DB:-hobees}",
                 "POSTGRES_USER": "${POSTGRES_USER:-hobees}",
@@ -213,16 +219,16 @@ def compose_document(spec: ContainerSpec) -> dict[str, Any]:
                 "start_period": "5s",
             },
         }
-        service["depends_on"] = {"db": {"condition": "service_healthy"}}
+        service["depends_on"] = {spec.postgres_service_name: {"condition": "service_healthy"}}
         document["volumes"] = {spec.db_volume: None}
 
     if spec.include_web:
         # Only when asked for: a pipeline does not need the web app running in the container.
         document["services"][spec.web_service_name] = {
-            "build": {"context": ".", "dockerfile": DEFAULT_DOCKERFILE},
+            "build": {"context": ".", "dockerfile": "./" + DEFAULT_DOCKERFILE},
             "image": spec.image,
             "profiles": ["ui"],
-            "env_file": [".env"],
+            "env_file": ["./.env"],
             "ports": [f"{DEFAULT_WEB_PORT}:{DEFAULT_WEB_PORT}"],
             "command": ["web", "--host", "0.0.0.0", "--port", str(DEFAULT_WEB_PORT)],
         }
@@ -241,10 +247,10 @@ def optional_web_block(spec: ContainerSpec) -> str:
         f"# {spec.web_service_name}:\n"
         "#   build:\n"
         "#     context: .\n"
-        f"#     dockerfile: {DEFAULT_DOCKERFILE}\n"
+        f"#     dockerfile: ./{DEFAULT_DOCKERFILE}\n"
         f"#   image: {spec.image}\n"
         "#   profiles: [ui]\n"
-        "#   env_file: [.env]\n"
+        "#   env_file: [./.env]\n"
         "#   ports:\n"
         f'#     - "{port}:{port}"\n'
         f'#   command: ["web", "--host", "0.0.0.0", "--port", "{port}"]\n'
@@ -334,6 +340,7 @@ def generated_files(spec: ContainerSpec, contents: dict[str, str]) -> dict[str, 
         DEFAULT_DOCKERFILE: contents.get(DEFAULT_DOCKERFILE, ""),
         spec.config_file: contents.get(spec.config_file, ""),
         spec.entrypoint_file: contents.get(spec.entrypoint_file, ""),
+        DEFAULT_ENV_SAMPLE_FILE: contents.get(DEFAULT_ENV_SAMPLE_FILE, ""),
     }
     if spec.goal_mode == "bake":
         files[spec.goal_file] = contents.get(spec.goal_file, "")
@@ -422,6 +429,12 @@ def dockerfile_text(spec: ContainerSpec) -> str:
         "",
         "# 6. The active configuration and the entrypoint script: init, then the goal",
         f"ENV HOBEES_CONFIG_PATH={CONFIG_TARGET}",
+    ]
+    if spec.goal_mode != "stdin":
+        # The script reads both paths from the environment, so each value is defined once -
+        # here. In stdin mode there is no goal file to point at.
+        lines.append(f"ENV HOBEES_GOAL_FILE={GOAL_TARGET}")
+    lines += [
         f"COPY --chown={CONTAINER_USER} {spec.config_file} {CONFIG_TARGET}",
         f"COPY --chown={CONTAINER_USER} {spec.entrypoint_file} {CONTAINER_ENTRYPOINT}",
         f"RUN chmod +x {CONTAINER_ENTRYPOINT}",
@@ -436,6 +449,45 @@ def dockerfile_text(spec: ContainerSpec) -> str:
     lines.append(f'ENTRYPOINT ["{CONTAINER_ENTRYPOINT}"]')
     return "\n".join(lines) + "\n"
 
+def env_keys_referenced(compose_text: str) -> list[str]:
+    """Names the generated compose file reads from .env, in order of appearance."""
+    seen: list[str] = []
+    for name in re.findall(r"\$\{([A-Za-z0-9_]+)", compose_text):
+        if name not in seen:
+            seen.append(name)
+    return seen
+
+
+def env_sample_text(spec: ContainerSpec) -> str:
+    """`.env.sample`: the keys the generated files need, listed without values.
+
+    Required first (no default, the container fails without them), then the names compose
+    can fall back on. No key value is written anywhere - this is a checklist for `.env`, so
+    a pipeline can copy it on the host that runs the container and fill the values there.
+    """
+    referenced = env_keys_referenced(compose_yaml(spec))
+    required = [name for name in spec.api_key_envs if name and name != "NONE"]
+    if spec.include_db:
+        required.append("POSTGRES_PASSWORD")
+    required = sorted(set(required))
+    optional = [name for name in referenced if name not in required]
+
+    lines = [
+        f"# {spec.project} - {DEFAULT_ENV_SAMPLE_FILE} (generated by hobees Studio, Containers tab)",
+        "# Keys only - copy to .env and fill the values. The generated files read these names,",
+        "# so a key missing here cannot be used by the container.",
+        "",
+        "# Required",
+    ]
+    for key in required:
+        lines.append(f"{key}=")
+    if optional:
+        lines.append("")
+        lines.append("# Referenced with a default in compose.yaml - set them to override")
+        for key in optional:
+            lines.append(f"{key}=")
+    return "\n".join(lines) + "\n"
+
 __all__ = [
     "ContainerSpec",
     "DEFAULT_BASE_IMAGE",
@@ -445,6 +497,7 @@ __all__ = [
     "compose_yaml",
     "default_spec",
     "docker_available",
-    "dockerfile_text",
+    "DEFAULT_ENV_SAMPLE_FILE",
+
     "validate_compose",
 ]

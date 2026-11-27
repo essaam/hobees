@@ -416,6 +416,8 @@ class ContainerPlanResponse(BaseModel):
     entrypoint: str = ""
     goal: str = ""
     pipeline_command: list[str] = Field(default_factory=list)
+    #: The keys the generated files need, listed without values - a checklist for .env.
+    env_sample: str = ""
     warnings: list[str] = Field(default_factory=list)
     docker_available: bool
     project_dir: str
@@ -423,6 +425,7 @@ class ContainerPlanResponse(BaseModel):
     dockerfile_exists: bool
     config_exists: bool = False
     goal_exists: bool = False
+    env_sample_exists: bool = False
 
 
 class ContainerFilesRequest(BaseModel):
@@ -431,6 +434,7 @@ class ContainerFilesRequest(BaseModel):
     config: str = ""
     entrypoint: str = ""
     goal: str = ""
+    env_sample: str = ""
     spec: Optional[ContainerSpec] = None
 
 
@@ -1399,6 +1403,7 @@ def create_web_app(read_only: bool = False) -> FastAPI:
             entrypoint=container_prep.entrypoint_text(spec),
             goal=spec.goal,
             pipeline_command=spec.pipeline_command(),
+            env_sample=container_prep.env_sample_text(spec),
             warnings=warnings,
             docker_available=container_prep.docker_available(),
             project_dir=str(root),
@@ -1406,6 +1411,7 @@ def create_web_app(read_only: bool = False) -> FastAPI:
             dockerfile_exists=(root / container_prep.DEFAULT_DOCKERFILE).is_file(),
             config_exists=(root / spec.config_file).is_file(),
             goal_exists=(root / spec.goal_file).is_file(),
+            env_sample_exists=(root / container_prep.DEFAULT_ENV_SAMPLE_FILE).is_file(),
         )
 
     @app.get("/api/v1/containers/plan", response_model=ContainerPlanResponse)
@@ -1435,11 +1441,13 @@ def create_web_app(read_only: bool = False) -> FastAPI:
 
         # Fixed names, and only inside the project root. The goal is written when a file
         # is what the container reads (mount or bake); stdin mode has no file to write.
+        # The .env.sample is the key checklist for the host that runs the container.
         files = {
             container_prep.DEFAULT_COMPOSE_FILE: body.compose,
             container_prep.DEFAULT_DOCKERFILE: body.dockerfile,
             spec.config_file: body.config,
             spec.entrypoint_file: body.entrypoint,
+            container_prep.DEFAULT_ENV_SAMPLE_FILE: body.env_sample,
         }
         if spec.goal_mode != "stdin":
             files[spec.goal_file] = body.goal
@@ -1697,12 +1705,22 @@ def create_web_app(read_only: bool = False) -> FastAPI:
             provider = session.get(LLMProvider, bee.provider_id)
             if not provider:
                 raise HTTPException(400, f"Provider {bee.provider_id} not found")
+            # A blank model is resolved the way the UI resolves it, so the row cannot be
+            # saved without a model the runtime would then fail on.
+            from hobees.core.model_discovery import resolve_model_name
+
+            model = resolve_model_name(provider, bee.model_name)
+            if not model:
+                raise HTTPException(
+                    400,
+                    f"Provider '{provider.alias}' has no model to use - detect models or type one",
+                )
             new_bee = Bee(
                 name=bee.name,
                 role_description=bee.role_description,
                 system_prompt=bee.system_prompt,
                 provider_id=bee.provider_id,
-                model_name=bee.model_name,
+                model_name=model,
                 temperature=bee.temperature,
                 thinking_level=bee.thinking_level,
                 tool_names=bee.tool_names,
@@ -1750,11 +1768,19 @@ def create_web_app(read_only: bool = False) -> FastAPI:
             provider = session.get(LLMProvider, hive.supervisor_provider_id)
             if not provider:
                 raise HTTPException(400, f"Provider {hive.supervisor_provider_id} not found")
+            from hobees.core.model_discovery import resolve_model_name
+
+            model = resolve_model_name(provider, hive.supervisor_model_name)
+            if not model:
+                raise HTTPException(
+                    400,
+                    f"Provider '{provider.alias}' has no model to use - detect models or type one",
+                )
             new_hive = Hive(
                 name=hive.name,
                 goal_description=hive.goal_description or None,
                 supervisor_provider_id=hive.supervisor_provider_id,
-                supervisor_model_name=hive.supervisor_model_name,
+                supervisor_model_name=model,
                 supervisor_prompt=hive.supervisor_prompt or None,
                 supervisor_thinking_level=hive.supervisor_thinking_level,
                 is_dynamic=hive.is_dynamic,

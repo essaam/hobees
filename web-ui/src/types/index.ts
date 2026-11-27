@@ -30,6 +30,7 @@ export interface ContainerSpec {
   include_db: boolean;
   db_image: string;
   db_volume: string;
+  postgres_service_name: string;
   // What the container carries and runs.
   config_file: string;
   goal: string;
@@ -50,6 +51,7 @@ export interface ContainerPlanResponse {
   entrypoint: string;
   goal: string;
   pipeline_command: string[];
+  env_sample: string;
   warnings: string[];
   docker_available: boolean;
   project_dir: string;
@@ -57,6 +59,7 @@ export interface ContainerPlanResponse {
   dockerfile_exists: boolean;
   config_exists: boolean;
   goal_exists: boolean;
+  env_sample_exists: boolean;
 }
 
 export interface ContainerSaveResponse {
@@ -72,6 +75,7 @@ export interface ContainerSaveRequest {
   config?: string;
   entrypoint?: string;
   goal?: string;
+  env_sample?: string;
   spec?: ContainerSpec;
 }
 

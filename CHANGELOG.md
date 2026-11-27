@@ -66,6 +66,10 @@ to a heading matching that version and add the release date.
   3 still running. The generated entrypoint keeps the path intact (`set -eu`, then `exec`), so nothing
   between hobees and the container's exit code can swallow it, and a remote daemon still reports the
   container's code to the caller.
+- Containers: the generated set now includes ".env.sample" - the key names the generated files
+  read, listed without values, required first (the provider keys and the Postgres password the
+  database URL cannot default) and then the names compose falls back on. Save and Download all
+  include it, and the plan reports which files already exist at the project root.
 - Core: detection defaults now include **DeepSeek** (`DEEPSEEK_API_KEY`,
   `https://api.deepseek.com/v1`).
 - CLI: `hobees run`, `hobees prompt` and `hobees hive run` accept `--goal-file <path>`
@@ -88,6 +92,18 @@ to a heading matching that version and add the release date.
 
 ### Fixed
 
+- Web UI: a model that is visibly selected in the Bee and Hive dialogs is now also the value the
+  form holds. When a provider had no "default_model", the picker showed its first detected
+  model while the form value stayed empty, so saving said "Pick or type a model name" and
+  **Test model** stayed disabled even though a model looked chosen - and the Workbench path worked
+  because the backend resolved the model itself. The Bee and Hive dialogs now resolve the model the
+  same way the picker displays it ("pickModel": requested, provider default, assistant model,
+  first detected), so the value on screen is the value that gets saved and Test model is enabled
+  whenever a model is known.
+  "POST /api/v1/bees" /
+  "POST /api/v1/hives" resolve a blank model the same way ("resolve_model_name") and refuse a
+  provider with nothing to use instead of storing a row the runtime would fail on.
+  (default, assistant, or the first detected one).
 - Reset: `hobees.db` is now actually removed. `configured_database_file()` falls back to
   the default `~/.hobees/hobees.db` when the env file carries no `HOBEES_DATABASE_URL`
   (the state a previous reset leaves behind), and `apply_plan()` releases the SQLAlchemy
@@ -95,6 +111,13 @@ to a heading matching that version and add the release date.
   fail with `WinError 32` on Windows. A file held open by another process is still
   reported rather than forced, and the CLI now names the paths left behind instead of
   claiming the slate is clean.
+- Containers: the Postgres service key and the host name in the generated database URL are now the
+  same value (`postgres_service_name`), the `db` hardcode is gone, every host path is written
+  relative to the compose file ("./" prefix: `./artifacts`, `./skills`, `./goal.txt`, `./.env`,
+  `./Dockerfile`), and a path is defined exactly once - `HOBEES_CONFIG_PATH` and
+  `HOBEES_GOAL_FILE` come from the `Dockerfile` "ENV" and the entrypoint script reads them from
+  the environment, so the compose "environment:" block no longer repeats them. In stdin mode no
+  goal path is defined at all, because there is no goal file.
 - Fixed: the generated Dockerfile installed the project from source instead of PyPI, published
   `8420` instead of the new `6543` default, and wrote `./C:/Users/...:/data/skills` for an absolute
   settings path (and the host name for `container_name`) — generated files now use relative paths

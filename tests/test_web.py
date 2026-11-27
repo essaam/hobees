@@ -71,7 +71,7 @@ def test_container_plan_and_files_endpoints(web_env, monkeypatch):
     assert custom.status_code == 200
     body = custom.json()
     assert "worker" in body["compose"]
-    assert "db" not in body["compose"]
+    assert "postgres" not in body["compose"]
 
     bad = client.post("/api/v1/containers/plan", json={"service": "Bad Service"})
     assert any("valid compose service key" in warning for warning in bad.json()["warnings"])
@@ -721,6 +721,10 @@ def test_container_plan_reports_the_generated_set_and_saves_it(web_env, monkeypa
     assert plan["pipeline_command"] == ["run", "--goal-file", "/data/goal.txt", "--json"]
     assert "./goal.txt:/data/goal.txt:ro" in plan["compose"]
     assert any("no goal set" in warning for warning in plan["warnings"])
+    # The .env key checklist is part of the generated set: keys, no values.
+    sample = client.post("/api/v1/containers/plan", json={"goal": "x", "api_key_envs": ["OPENAI_API_KEY"]}).json()["env_sample"]
+    assert "OPENAI_API_KEY=" in sample and "POSTGRES_PASSWORD=" in sample
+    assert "sk-" not in sample
 
     baked = client.post(
         "/api/v1/containers/plan",
@@ -744,11 +748,19 @@ def test_container_plan_reports_the_generated_set_and_saves_it(web_env, monkeypa
             "config": "providers: []",
             "entrypoint": "#!/bin/sh\nset -eu",
             "goal": "Review src/",
+            "env_sample": "OPENAI_API_KEY=\n",
         },
     )
     assert saved.status_code == 200
     names = {Path(item).name for item in saved.json()["saved"]}
-    assert names == {"compose.yaml", "Dockerfile", "hobees.yaml", "docker-entrypoint.sh", "goal.txt"}
+    assert names == {
+        "compose.yaml",
+        "Dockerfile",
+        "hobees.yaml",
+        "docker-entrypoint.sh",
+        ".env.sample",
+        "goal.txt",
+    }
 
     # stdin mode has no goal file to write.
     stdin_saved = client.post(
@@ -776,3 +788,75 @@ def test_container_plan_flags_an_empty_active_config(web_env, monkeypatch):
     client = TestClient(create_web_app())
     plan = client.get("/api/v1/containers/plan").json()
     assert any("active configuration is empty" in warning for warning in plan["warnings"])
+
+
+def test_a_blank_model_is_resolved_the_way_the_ui_shows_it(web_env):
+    client = TestClient(create_web_app())
+
+    with_default = client.post(
+        "/api/v1/providers",
+        json={
+            "alias": "has-default",
+            "provider_type": "openai_compatible",
+            "base_url": "http://localhost:11434/v1",
+            "api_key_env": "NONE",
+            "default_model": "llama3",
+        },
+    ).json()
+
+    # The Bee dialog shows a model as chosen; saving must store that same model.
+    bee = client.post(
+        "/api/v1/bees",
+        json={
+            "name": "bee-blank",
+            "role_description": "Reads",
+            "system_prompt": "",
+            "provider_id": with_default["id"],
+            "model_name": "",
+            "temperature": 0,
+            "thinking_level": "off",
+            "tool_names": [],
+            "require_approval": [],
+        },
+    )
+    assert bee.status_code == 200
+    assert bee.json()["model_name"] == "llama3"
+
+    # Nothing to resolve: the request is refused instead of storing a Bee with no model.
+    bare = client.post(
+        "/api/v1/providers",
+        json={"alias": "no-model", "provider_type": "openai", "api_key_env": "OPENAI_API_KEY"},
+    ).json()
+    refused = client.post(
+        "/api/v1/bees",
+        json={
+            "name": "bee-no-model",
+            "role_description": "Reads",
+            "system_prompt": "",
+            "provider_id": bare["id"],
+            "model_name": "",
+            "temperature": 0,
+            "thinking_level": "off",
+            "tool_names": [],
+            "require_approval": [],
+        },
+    )
+    assert refused.status_code == 400
+    assert "has no model to use" in refused.json()["detail"]
+
+    hive = client.post(
+        "/api/v1/hives",
+        json={
+            "name": "hive-blank",
+            "goal_description": "goal",
+            "supervisor_provider_id": with_default["id"],
+            "supervisor_model_name": "",
+            "supervisor_prompt": "",
+            "supervisor_thinking_level": "off",
+            "is_dynamic": True,
+            "project_path": "",
+            "bee_ids": [],
+        },
+    )
+    assert hive.status_code == 200
+    assert hive.json()["supervisor_model_name"] == "llama3"

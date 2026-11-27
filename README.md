@@ -560,8 +560,14 @@ Studio extras:
   the goal can change per run without a rebuild), a **baked `COPY`** (opt-in), or **stdin**, and the
   prompt text is never written into the script, so it can never be read as shell. Running the web
   app inside the container is optional and stays commented out by default. Generated paths are
-  relative (`./artifacts`, `./skills`, `./goal.txt`) and the container name is read at run time,
-  so nothing from one machine is baked into a committed file. Env values stay `${NAME}` references.
+  relative (`./artifacts`, `./skills`, `./goal.txt`, `./.env`) and the container name is read at run time,
+  so nothing from one machine is baked into a committed file. Each path is defined once — the
+  `Dockerfile` `ENV` sets `HOBEES_CONFIG_PATH`/`HOBEES_GOAL_FILE` and the script reads them from the
+  environment rather than repeating the value — and the Postgres service key and the host name the
+  container resolves come from the same field, so they cannot drift apart. Env values stay `${NAME}`
+  references, and the tab also generates **`.env.sample`**: the keys the generated files read, listed
+  without values (required first, then the ones compose can default), so the host that runs the
+  container knows exactly what to fill in.
   There is no `CMD` in the generated `Dockerfile`: the entrypoint script is the single place that
   decides (init, then the goal), so a baked command line would duplicate it. The tab **only writes
   files** — nothing in it starts or stops a container, so the shown `docker compose run …` command is
@@ -831,9 +837,9 @@ A one-shot container is headless, so the approval default there is `strict`: a g
 To load declarative setup, uncomment the optional `./config:/config:ro` mount in `compose.yaml`, set `HOBEES_CONFIG_PATH=/config/hobees.yaml` in `.env`, and place the config file in `./config`. You can instead run a one-time import with `docker compose run --rm hobees init --config /config/hobees.yaml`.
 
 The web UI's **Studio → Containers** tab prepares that deployment from the browser: it builds the
-`compose.yaml`, `Dockerfile`, `hobees.yaml`, `goal.txt` and `docker-entrypoint.sh` from the live
-settings and the registered providers, shows validation warnings, and can save them to the project
-root (`HOBEES_PROJECT_ROOT`, fixed names) or download each file separately. The tab does not start or
+`compose.yaml`, `Dockerfile`, `hobees.yaml`, `goal.txt`, `docker-entrypoint.sh` and `.env.sample`
+from the live settings and the registered providers, shows validation warnings, and can save them to
+the project root (`HOBEES_PROJECT_ROOT`, fixed names) or download each file separately. The tab does not start or
 stop containers — `docker` and `docker compose` are run by you or by CI. The `Dockerfile` installs
 `hobees` from PyPI (`uv tool install hobees`), has no source tree in the image, and defines no `CMD`:
 `docker-entrypoint.sh` is what runs, initializing hobees with the copied config and then running the

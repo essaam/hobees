@@ -126,6 +126,17 @@ Keep `./artifacts` and `./skills` mounted when testing features that write files
   its `WORKDIR`. Generated paths are relative to the project root and run-time names are used
   (`CONTAINER_NAME_PLACEHOLDER`) so a machine-specific path or host name can never be written into a
   committed file; the web service is optional and commented out unless `include_web` is set.
+  A path or value is defined once: the `Dockerfile` `ENV` provides `HOBEES_CONFIG_PATH` and
+  `HOBEES_GOAL_FILE` and `docker-entrypoint.sh` reads them from the environment, so compose must not
+  redefine them; the Postgres service key and the database host come from `postgres_service_name`; and
+  every host path is written relative to the compose file (`./`). `.env.sample` lists key **names**
+  only, never values, and must stay consistent with the names compose interpolates.
+  In the Web UI, the model visibly selected must be the value the form stores: one order in the form
+  ("pickModel") and the API ("resolve_model_name") - requested, provider default,
+  assistant model, first detected, otherwise nothing. If the form holds an empty value while the picker
+  shows one, saving reports "no model" and Test model stays disabled - that was the bug.
+  saving a Bee or Hive says "add a model" and Test model stays disabled while one looks chosen. The API uses the same order ("resolve_model_name"): asked-for,
+  default, assistant, first detected, and a provider with none of those is refused.
   The generator writes no `CMD` and no default compose `command`: `docker-entrypoint.sh` is the only
   place that decides what runs, and `spec.command` is an explicit override. The Containers tab is
   file-generation only - it must not offer to start or stop a container - and a field change reaches

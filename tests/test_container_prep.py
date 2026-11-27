@@ -21,13 +21,14 @@ def test_compose_yaml_keeps_environment_names_not_values(tmp_path, monkeypatch):
     parsed = yaml.safe_load(text)
 
     service = parsed["services"]["hobees"]
+    spec_postgres_service_name = spec.postgres_service_name
     # Nothing from the author's machine is baked in: the name is read at run time.
     assert service["container_name"] == container_prep.CONTAINER_NAME_PLACEHOLDER
     assert socket.gethostname() not in text
     assert service["environment"]["OPENAI_API_KEY"] == "${OPENAI_API_KEY}"
     assert "sk-" not in text
     assert service["profiles"] == ["pipeline"]
-    assert service["depends_on"]["db"]["condition"] == "service_healthy"
+    assert service["depends_on"][spec_postgres_service_name]["condition"] == "service_healthy"
     assert parsed["volumes"]["postgres_data"] is None
     # The container runs the goal, and the goal is mounted read-only by default.
     assert "./goal.txt:/data/goal.txt:ro" in service["volumes"]
@@ -212,3 +213,85 @@ def test_an_explicit_container_name_still_wins():
     spec = container_prep.ContainerSpec(goal="x", container_name="worker-1")
     parsed = yaml.safe_load(container_prep.compose_yaml(spec))
     assert parsed["services"]["hobees"]["container_name"] == "worker-1"
+
+def test_paths_are_relative_and_one_service_name_is_used_everywhere():
+    spec = container_prep.ContainerSpec(goal="x", api_key_envs=["OPENAI_API_KEY"])
+    text = container_prep.compose_yaml(spec)
+    parsed = yaml.safe_load(text)
+    service = parsed["services"]["hobees"]
+
+    # A bare name would resolve against the wrong place; a leading ./ keeps it relative to
+    # the folder the compose file lives in.
+    assert service["env_file"] == ["./.env"]
+    assert service["build"]["dockerfile"] == "./Dockerfile"
+    assert all(item.startswith("./") for item in service["volumes"])
+
+    # The service key and the host name the container resolves are the same value.
+    assert spec.postgres_service_name in parsed["services"]
+    assert f"@{spec.postgres_service_name}:5432" in text
+    assert service["environment"]["OPENAI_API_KEY"] == "${OPENAI_API_KEY}"
+    assert not any(key.startswith("sk-") for key in service["environment"])
+
+
+def test_paths_defined_by_the_dockerfile_are_not_redefined_in_compose():
+    spec = container_prep.ContainerSpec(goal="x", goal_mode="mount")
+    compose = yaml.safe_load(container_prep.compose_yaml(spec))["services"]["hobees"]
+    dockerfile = container_prep.dockerfile_text(spec)
+
+    # Each path is defined once: the Dockerfile ENV, and the script reads it from the env.
+    assert f"ENV HOBEES_CONFIG_PATH={container_prep.CONFIG_TARGET}" in dockerfile
+    assert f"ENV HOBEES_GOAL_FILE={container_prep.GOAL_TARGET}" in dockerfile
+    assert "HOBEES_CONFIG_PATH" not in compose["environment"]
+    assert "HOBEES_GOAL_FILE" not in compose["environment"]
+
+    script = container_prep.entrypoint_text(spec)
+    assert '${HOBEES_CONFIG_PATH:-' in script
+    assert '${HOBEES_GOAL_FILE:-' in script
+
+    # stdin mode has no goal file, so no goal path is defined for it.
+    stdin = container_prep.ContainerSpec(goal_mode="stdin")
+    assert "HOBEES_GOAL_FILE" not in container_prep.dockerfile_text(stdin)
+
+
+def test_env_sample_lists_the_keys_without_values():
+    spec = container_prep.ContainerSpec(
+        goal="x",
+        api_key_envs=["OPENAI_API_KEY", "DEEPSEEK_API_KEY", "NONE"],
+    )
+    sample = container_prep.env_sample_text(spec)
+
+    # Required: the provider keys and the password the DB URL cannot default.
+    required_part = sample.split("# Required")[1].split("# Referenced")[0]
+    for key in ("DEEPSEEK_API_KEY", "OPENAI_API_KEY", "POSTGRES_PASSWORD"):
+        assert f"{key}=" in required_part
+
+    # Names with a default in compose.yaml are listed separately, still without values.
+    optional_part = sample.split("# Referenced")[1]
+    for key in ("HOBEES_UID", "HOBEES_GID", "POSTGRES_USER", "HOBEES_CONTAINER_NAME"):
+        assert f"{key}=" in optional_part
+
+    assert "sk-" not in sample
+    assert ".env.sample" in container_prep.generated_files(spec, {})
+
+
+def test_the_env_sample_is_written_with_the_generated_set(tmp_path, monkeypatch):
+    monkeypatch.setenv("HOBEES_PROJECT_ROOT", str(tmp_path))
+    spec = container_prep.ContainerSpec(goal="x", api_key_envs=["OPENAI_API_KEY"])
+    sample = container_prep.env_sample_text(spec)
+    contents = {
+        ".env.sample": sample,
+        "compose.yaml": container_prep.compose_yaml(spec),
+        "Dockerfile": container_prep.dockerfile_text(spec),
+        "hobees.yaml": "providers: []",
+        "docker-entrypoint.sh": container_prep.entrypoint_text(spec),
+    }
+    files = container_prep.generated_files(spec, contents)
+    written = container_prep.save_project_files(files, tmp_path)
+    names = {Path(path).name for path in written}
+    assert names == {
+        "compose.yaml",
+        "Dockerfile",
+        "hobees.yaml",
+        "docker-entrypoint.sh",
+        ".env.sample",
+    }

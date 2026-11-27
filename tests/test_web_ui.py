@@ -73,6 +73,16 @@ def test_studio_has_a_containers_tab_wired_to_the_api():
     # Generation only: the tab writes files, it never starts or stops a container.
     assert "Update spec" in studio
     assert "Download all files" in studio
+    assert "setEnvSample(res.env_sample)" in studio
+    # The model on screen is the model that is saved: one resolution order in the form,
+    # the picker and the API, so saving cannot be blocked while a model looks chosen.
+    assert "function pickModel(" in studio
+    # The models the picker fetches have to be visible to the form, not only inside the
+    # picker - otherwise the guard can still see an empty value.
+    assert "detectedCache" in studio
+    assert "detectedCache[key] = res.models" in studio
+    assert "value={model} onChange={setModelName}" in studio
+    assert "reports no model - detect models or type one" in studio
     assert "runAction" not in studio
     assert "/containers/action" not in read("api/client.ts")
     assert "Save to project" in studio
@@ -278,6 +288,8 @@ def test_containers_tab_runs_the_goal_from_a_file_or_pipe():
     assert "hobees init --config" in studio
     assert "Export hobees.yaml" in studio
     assert "Export entrypoint" in studio
+    assert ".env.sample" in studio
+    assert "setEnvSample(res.env_sample)" in studio
     assert "The exit code is how a pipeline learns the outcome" in studio
     assert "State.ExitCode" in studio
     assert "hobees pipeline status" in studio
@@ -289,3 +301,12 @@ def test_preview_refreshes_the_run_command_with_the_settings():
     for call in ("setPipeline(res.pipeline_command)", "setConfig(res.config)", "setEntrypoint(res.entrypoint)"):
         assert call in studio
     assert "include the web service" in studio
+def test_the_bee_and_hive_forms_resolve_the_model_they_show():
+    studio = read("pages/Studio.tsx")
+    body = studio[studio.index("function pickModel("):studio.index("function ModelPicker({")]
+    # Requested, then provider default, then assistant, then the first detected model.
+    for step in ("requested.trim()", "provider?.default_model", "provider?.assistant_model", "provider?.available_models?.[0]"):
+        assert step in body
+    # The saved row uses that resolved value, and the error only fires when nothing is known.
+    assert "model_name: model," in studio and "supervisor_model_name: model," in studio
+    assert "if (!model) {" in studio
