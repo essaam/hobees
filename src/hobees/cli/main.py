@@ -19,6 +19,7 @@ import typer
 from rich.console import Console
 from rich.markup import escape
 from rich.table import Table
+from sqlalchemy.engine import URL
 
 from hobees.cli.icons import APP, ERROR, SUCCESS, WARN
 from hobees.cli.approval_cmd import approvals_command
@@ -444,7 +445,7 @@ def _sync_startup_config(config_path: Path) -> None:
         raise typer.Exit(code=1) from exc
 
 
-def _setup_postgres_checkpointer(db_url) -> None:
+def _setup_postgres_checkpointer(db_url: str | URL) -> None:
     from hobees.db.backends import get_database_backend, get_postgres_checkpoint_url
 
     if get_database_backend(db_url) == "sqlite":

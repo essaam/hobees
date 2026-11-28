@@ -621,7 +621,7 @@ flowchart TD
 |--------|----------------|-------------|
 | `config.py` | Application settings via pydantic-settings | `settings` (Settings instance) |
 | `db/session.py` | SQLAlchemy engine and session management | `get_engine()`, `session_scope()`, `dispose_engine()` |
-| `db/backends.py` | Validate supported database URLs and normalize PostgreSQL checkpoint URLs | `get_database_backend()`, `get_postgres_checkpoint_url()` |
+| `db/backends.py` | Validate supported database URLs, render them with the password intact, and normalize PostgreSQL checkpoint URLs | `get_database_backend()`, `render_db_url()`, `get_postgres_checkpoint_url()` |
 | `db/models.py` | SQLAlchemy ORM models matching schema | `LLMProvider`, `Bee`, `Hive`, `Run`, `UsageEvent`, `Memory`, `Skill`, `BeeSkill` |
 | `db/analytics.py` | Fast SQL aggregations for usage insights | `summary()`, `active_runs()`, `recent_events()`, `run_thread_usage()` |
 | `core/llm_factory.py` | Resolve provider rows → LangChain ChatModels with thinking_level | `get_chat_model()`, `resolve_api_key()`, `ThinkingLevel` |
@@ -712,6 +712,14 @@ def get_engine() -> Engine:
 
 PostgreSQL supports concurrent access from the CLI, `hobees stats`, and the
 FastAPI server.
+
+A URL must reach a connection as a `URL` object, not as text: `URL.__str__()` masks the
+password as `***`, so `str(engine.url)`, `str(session.bind.url)` or an f-string turns the mask
+into the password that is then sent to the server - the engine still connects because it holds
+the real value, while `PostgresSaver` fails with `password authentication failed`. Every place
+that needs the URL as text goes through `render_db_url()` / `render_as_string(hide_password=False)`,
+and `get_postgres_checkpoint_url()` rejects an already-masked URL so the failure names the lost
+password instead of looking like a wrong one.
 
 PostgreSQL is recommended when multiple processes or terminals share the
 database. SQLite is supported for local use; concurrent writes can contend

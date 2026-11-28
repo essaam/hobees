@@ -446,7 +446,7 @@ def test_shell_goal_passes_the_session_level_to_the_graph(monkeypatch, tmp_path)
         provider = session.get(LLMProvider, provider_id)
 
     state = {"approval_mode": "strict", "thinking_override": "auto"}
-    shell._handle_goal(["do", "the", "thing"], provider, str(engine.url), state)
+    shell._handle_goal(["do", "the", "thing"], provider, engine.url, state)
     assert captured["kwargs"]["approval_mode"] == "strict"
     engine.dispose()
 

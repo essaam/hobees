@@ -229,7 +229,7 @@ def test_shell_goal_harvests_completed_run(monkeypatch, tmp_path):
         shell._handle_goal(
             ["Run", "a", "shell", "goal"],
             provider,
-            str(engine.url),
+            engine.url,
             {"approval_mode": "auto"},
         )
 
@@ -329,7 +329,7 @@ def test_shell_hive_chat_harvests_the_completed_session(monkeypatch, tmp_path):
             shell._chat_with_hive(
                 "interactive-hive",
                 provider,
-                str(engine.url),
+                engine.url,
                 {},
             )
         )

@@ -113,6 +113,16 @@ to a heading matching that version and add the release date.
 
 ### Fixed
 
+- Database: `hobees run` no longer authenticates with a masked password. `str(url)` and
+  `f"{url}"` write the password as `***`, and `hobees.core.hive_builder._build_hive_graph()` returned
+  `str(db_url)` - so both the sync and the async checkpointer got `postgresql://hobees:***@host/db`
+  from `get_postgres_checkpoint_url()`, while SQLAlchemy and `hobees init` kept connecting because
+  they hold the URL object itself. The hive paths now render with `render_db_url()`
+  (`render_as_string(hide_password=False)`), which accepts `str | URL` and keeps `engine.url` /
+  `session.bind.url` intact, and `get_postgres_checkpoint_url()` refuses a URL that already arrived
+  masked instead of connecting with `***` - the failure then names the lost password rather than
+  looking like a wrong one. `hobees/db/backends.py`, `hobees/core/hive_builder.py`,
+  `hobees/cli/shell.py`, `hobees/cli/main.py`, `hobees/core/queen.py`.
 - Web UI: a model that is visibly selected in the Bee and Hive dialogs is now also the value the
   form holds. When a provider had no "default_model", the picker showed its first detected
   model while the form value stayed empty, so saving said "Pick or type a model name" and

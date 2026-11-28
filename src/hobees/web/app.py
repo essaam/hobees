@@ -1080,7 +1080,9 @@ async def _run_hive_graph_task(
             hive,
             bees,
             providers,
-            str(get_engine().url),
+            # The URL object, not str(engine.url): the string form masks the password as ***,
+            # and the async checkpointer would then connect with that. See render_db_url().
+            get_engine().url,
             thread_id,
             run_id,
             thinking,

@@ -48,6 +48,85 @@ def test_database_backend_selection_and_validation():
         get_database_backend("mysql://user:pass@localhost/hobees")
 
 
+def test_urls_reach_the_checkpointer_with_the_password_intact():
+    """The reported failure: SQLAlchemy connects with the URL object while a run that
+    stringifies it first authenticates with the mask, so Postgres answers
+    `password authentication failed` for a password nobody wrote.
+    """
+    from sqlalchemy import create_engine
+    from sqlalchemy.engine import make_url
+    from sqlalchemy.orm import sessionmaker
+
+    from hobees.db.backends import MASKED_PASSWORD, render_db_url
+
+    raw = "postgresql+psycopg://hobees:secretpass@localhost:5432/hobeesdb"
+    engine = create_engine(raw)  # building an engine connects nothing
+    url = engine.url
+
+    assert url.password == "secretpass"
+    assert str(url) == "postgresql+psycopg://hobees:***@localhost:5432/hobeesdb"
+    assert MASKED_PASSWORD in str(url)
+
+    # A string and a URL object must give the same psycopg connection string.
+    assert get_postgres_checkpoint_url(raw) == "postgresql://hobees:secretpass@localhost:5432/hobeesdb"
+    assert get_postgres_checkpoint_url(url) == "postgresql://hobees:secretpass@localhost:5432/hobeesdb"
+    assert render_db_url(raw) == raw
+    assert render_db_url(url) == raw
+    assert get_database_backend(url) == "postgresql"
+
+    # The session path is the same object: session.bind.url keeps the password.
+    session = sessionmaker(bind=engine, autoflush=False)()
+    assert session.bind.url.password == "secretpass"
+    assert "secretpass" in get_postgres_checkpoint_url(session.bind.url)
+    session.close()
+
+    # A URL that already lost its password cannot be recovered: the mask is the password by
+    # then, so the run reports where it was lost instead of connecting with ***.
+    for masked in (str(url), f"{url}", make_url(str(url))):
+        with pytest.raises(ValueError, match="masked password"):
+            get_postgres_checkpoint_url(masked)
+        with pytest.raises(ValueError, match="masked password"):
+            render_db_url(masked)
+
+
+def test_no_execution_path_stringifies_the_database_url():
+    """A URL reaches a connection as an object, never as text: str()/f-string masks the
+    password and the mask then becomes the password sent to the server. These are the paths
+    that build a checkpointer, so they must render the URL instead of stringifying it."""
+    import re
+    from pathlib import Path
+
+    src = Path(__file__).resolve().parents[1] / "src" / "hobees"
+    names = [
+        "core/hive_builder.py",
+        "core/queen.py",
+        "cli/shell.py",
+        "cli/main.py",
+        "cli/hive_cmd.py",
+        "cli/tui.py",
+        "api/app.py",
+        "web/app.py",
+        "db/backends.py",
+    ]
+    offenders = []
+    pattern = re.compile(r"(?:str\(|f\"[^\"]*\{)(get_engine\(\)\.url|engine\.url|session\.bind\.url|db_url)")
+    for name in names:
+        path = src / name
+        if not path.is_file():
+            continue
+        for line in path.read_text(encoding="utf-8").splitlines():
+            if line.strip().startswith("#"):
+                continue  # the rule, written as a comment
+            match = pattern.search(line)
+            if match:
+                offenders.append(f"{name}:{line.strip()}")
+
+    assert not offenders
+    checkpointer_source = (src / "db/backends.py").read_text(encoding="utf-8")
+    assert "hide_password=False" in checkpointer_source
+    assert "render_db_url(db_url)" in (src / "core/hive_builder.py").read_text(encoding="utf-8")
+
+
 def test_shared_engine_accepts_sqlite_url(monkeypatch):
     from hobees.config import settings
     from hobees.db import session as db_session
