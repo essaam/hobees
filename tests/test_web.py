@@ -723,6 +723,10 @@ def test_container_plan_reports_the_generated_set_and_saves_it(web_env, monkeypa
     # init-dirs is the first service: the folders the bind mounts point at are created and
     # chowned to the container user before anything that writes into them starts.
     assert "init-dirs" in plan["compose"]
+    assert "/workspace/postgres_data" not in plan["compose"]
+    # Postgres data is a named volume, so it is declared in the top-level block at the bottom.
+    assert "postgres_data:/var/lib/postgresql/data" in plan["compose"]
+    assert plan["compose"].rstrip().endswith("volumes:\n  postgres_data:")
     assert any("no goal set" in warning for warning in plan["warnings"])
     # The .env key checklist is part of the generated set: keys, no values.
     sample = client.post("/api/v1/containers/plan", json={"goal": "x", "api_key_envs": ["OPENAI_API_KEY"]}).json()["env_sample"]

@@ -14,8 +14,9 @@ text is never written into the entrypoint script, so it can never be read as she
 The shape of every file follows the set that is known to run against Docker: `init-dirs`
 creates the host folders the bind mounts point at and hands them to the container user
 before anything else starts, the goal runner waits for that and for a healthy database,
-and Postgres keeps its data in a project folder rather than a named volume. Values come
-from the fields the Containers tab exposes as inputs; the structure around them is fixed.
+and Postgres keeps its data in a named Docker volume declared in the top-level `volumes:`
+block at the bottom of the file. Values come from the fields the Containers tab exposes as
+inputs; the structure around them is fixed.
 """
 
 from __future__ import annotations
@@ -67,8 +68,10 @@ DEFAULT_EXTRA_HOSTS = ["host.docker.internal:host-gateway"]
 DEFAULT_DB_IMAGE = "postgres:16-alpine"
 DEFAULT_DB_NAME = "hobeesdb"
 DEFAULT_DB_USER = "hobees"
-#: A host folder rather than a named volume, so init-dirs can create and chown it.
-DEFAULT_DB_VOLUME = "./postgres_data"
+#: A named Docker volume, declared in the top-level `volumes:` block at the bottom of the
+#: compose file. Postgres owns it, `init-dirs` cannot prepare a volume it cannot mount, and it
+#: survives `docker compose down` - `docker compose down -v` is what removes it.
+DEFAULT_DB_VOLUME = "postgres_data"
 DB_DATA_TARGET = "/var/lib/postgresql/data"
 
 GOAL_MODES: tuple[str, ...] = ("mount", "bake", "stdin")
@@ -101,6 +104,18 @@ _YAML_SPECIAL = re.compile(
 )
 _PLAIN_UNSAFE = re.compile(r"[^\x20-\x7e]")
 _INDICATORS = "-?:,[]{}#&*!|>'\"`@"
+
+
+def is_named_volume(source: str) -> bool:
+    """Whether the source half of a `source:target` mount is a Docker volume name.
+
+    A source with a path separator is a host folder (relative or absolute) and can be created
+    by `init-dirs`, and `.` is the project folder itself, so neither is a volume. A bare name
+    has to be declared in the top-level `volumes:` block.
+    """
+    if not source or source in (".", ".."):
+        return False
+    return not source.startswith("./") and "/" not in source and "\\" not in source
 
 
 class ContainerSpec(BaseModel):
@@ -225,6 +240,21 @@ class ContainerSpec(BaseModel):
             if name and name not in dirs:
                 dirs.append(name)
         return dirs
+
+    def named_volumes(self) -> list[str]:
+        """Docker volumes the services mount, in the order they first appear.
+
+        These are declared in the top-level `volumes:` block: there is no host folder for
+        `init-dirs` to prepare, and the name is created by the service that mounts it.
+        """
+        names: list[str] = []
+        for mount in self.resolved_volumes():
+            source = mount.split(":", 1)[0]
+            if is_named_volume(source) and source not in names:
+                names.append(source)
+        if self.include_db and is_named_volume(self.db_volume) and self.db_volume not in names:
+            names.append(self.db_volume)
+        return names
 
     def db_url(self) -> str:
         return (
@@ -403,7 +433,8 @@ def compose_document(spec: ContainerSpec) -> dict[str, Any]:
         database: dict[str, Any] = {
             "image": spec.db_image,
             "env_file": ["./.env"],
-            # A project folder, not a named volume, so init-dirs can create it first.
+            # The default is a named volume, declared in the bottom `volumes:` block; a typed
+            # `./folder` stays a bind mount that init-dirs prepares.
             "volumes": [f"{spec.db_volume}:{DB_DATA_TARGET}"],
         }
         if dirs:
@@ -449,7 +480,32 @@ def compose_yaml(spec: ContainerSpec) -> str:
             lines.append("")
         lines.append(f"  {name}:")
         lines.extend(_dump(body, 2))
-    return "\n".join(lines) + "\n" + optional_web_block(spec) + "\n"
+
+    note = optional_web_block(spec).strip()
+    if note:
+        lines.append("")
+        lines.append(note)
+
+    block = volumes_block(spec)
+    if block:
+        lines.append("")
+        lines.append(block)
+
+    return "\n".join(lines) + "\n"
+
+
+def volumes_block(spec: ContainerSpec) -> str:
+    """The top-level `volumes:` block at the bottom of the file.
+
+    A named volume has no host folder, so it is declared here rather than created by
+    `init-dirs`. Declaring it keeps the volume part of the project definition: a volume only
+    referenced by a service stays implicit, and `docker compose down -v` does not remove an
+    implicit volume, only the ones the file declares.
+    """
+    names = spec.named_volumes()
+    if not names:
+        return ""
+    return "\n".join(["volumes:"] + [f"  {name}:" for name in names])
 
 
 def optional_web_block(spec: ContainerSpec) -> str:
@@ -492,8 +548,12 @@ def validate_compose(text: str) -> tuple[dict[str, Any], list[str]]:
     services = parsed.get("services")
     warnings: list[str] = []
     if not isinstance(services, dict) or not services:
-        warnings.append("no `services:` entries - `docker compose up` would start nothing")
+        warnings.append("no `services:` entries - `docker compose run` would start nothing")
         return parsed, warnings
+
+    declared = parsed.get("volumes") or {}
+    if not isinstance(declared, dict):
+        declared = {}
 
     for name, body in services.items():
         if not isinstance(body, dict):
@@ -501,6 +561,16 @@ def validate_compose(text: str) -> tuple[dict[str, Any], list[str]]:
             continue
         if not body.get("image") and not body.get("build"):
             warnings.append(f"service {name!r} has neither `image` nor `build`")
+        for mount in body.get("volumes") or []:
+            if isinstance(mount, str):
+                source = mount.split(":", 1)[0]
+                # A bare name is a volume, so it has to be declared in the top-level block.
+                if is_named_volume(source) and source not in declared:
+                    warnings.append(
+                        f"volume {source!r} is mounted by {name!r} but is not declared in the "
+                        "top-level `volumes:` block, so Compose treats it as an implicit volume "
+                        "that `docker compose down -v` does not remove"
+                    )
         if body.get("privileged"):
             warnings.append(f"service {name!r} requests `privileged` mode")
         env = body.get("environment") or {}
@@ -763,9 +833,11 @@ __all__ = [
     "env_keys_referenced",
     "env_sample_text",
     "generated_files",
+    "is_named_volume",
     "optional_web_block",
     "project_root",
     "save_project_files",
     "validate_compose",
+    "volumes_block",
     "yaml_scalar",
 ]

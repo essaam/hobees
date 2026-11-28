@@ -1,10 +1,11 @@
 """Tests for the Studio Containers tab backend (`hobees.core.container_prep`).
 
 The generated set is the one that is known to run against Docker: `init-dirs` prepares the
-bind-mounted folders, the goal runner waits for it and for a healthy Postgres, and the
-entrypoint script initialises the schema from `hobees.yaml` before it runs the goal. These
-tests pin that shape, so a change in the generator is a change in the files someone must
-then re-run - not a quiet drift away from the working set.
+bind-mounted folders, the goal runner waits for it and for a healthy Postgres, Postgres keeps
+its data in a named volume declared at the bottom of the file, and the entrypoint script
+initialises the schema from `hobees.yaml` before it runs the goal. These tests pin that shape,
+so a change in the generator is a change in the files someone must then re-run - not a quiet
+drift away from the working set.
 """
 
 from __future__ import annotations
@@ -30,8 +31,8 @@ services:
       - sh
       - -c
       - |
-        mkdir -p /workspace/output /workspace/skills /workspace/postgres_data &&
-        chown -R ${HOBEES_UID:-1000}:${HOBEES_GID:-1000} /workspace/output /workspace/skills /workspace/postgres_data
+        mkdir -p /workspace/output /workspace/skills &&
+        chown -R ${HOBEES_UID:-1000}:${HOBEES_GID:-1000} /workspace/output /workspace/skills
 
   hobees:
     build:
@@ -68,7 +69,7 @@ services:
     env_file:
       - ./.env
     volumes:
-      - ./postgres_data:/var/lib/postgresql/data
+      - postgres_data:/var/lib/postgresql/data
     depends_on:
       init-dirs:
         condition: service_completed_successfully
@@ -92,6 +93,9 @@ services:
 #     ports:
 #       - "6543:6543"
 #     command: ["web", "--host", "0.0.0.0", "--port", "6543"]
+
+volumes:
+  postgres_data:
 """
 
 TESTED_DOCKERFILE = """FROM python:3.12-slim
@@ -216,8 +220,10 @@ def test_compose_yaml_keeps_environment_names_not_values():
     # instead of connecting to a database nobody configured.
     assert "${POSTGRES_PASSWORD:?error}" in service["environment"]["HOBEES_DATABASE_URL"]
     assert service["depends_on"]["postgres"]["condition"] == "service_healthy"
-    # Postgres data is a project folder, prepared by init-dirs, not a named volume.
-    assert "volumes" not in parsed or "postgres_data" not in (parsed.get("volumes") or {})
+    # Postgres data is a named Docker volume, declared in the top-level block at the bottom
+    # of the file: init-dirs has no host folder to create for it.
+    assert parsed["services"]["postgres"]["volumes"] == ["postgres_data:/var/lib/postgresql/data"]
+    assert parsed["volumes"] == {"postgres_data": None}
     assert service["volumes"][-1] == "./goal.txt:/home/hobees/goal.txt:ro"
     # Nothing is baked as a default command: the entrypoint script decides what runs.
     assert "command" not in service
@@ -230,11 +236,12 @@ def test_init_dirs_prepares_the_mounted_folders_before_anything_runs():
     parsed = yaml.safe_load(container_prep.compose_yaml(reference_spec()))
     init = parsed["services"]["init-dirs"]
 
-    # The goal is a file mount, so it is not created as a folder.
+    # The goal is a file mount, so it is not created as a folder, and a named volume has no
+    # host folder either.
     assert init["command"][2].strip() == (
-        "mkdir -p /workspace/output /workspace/skills /workspace/postgres_data &&\n"
+        "mkdir -p /workspace/output /workspace/skills &&\n"
         "chown -R ${HOBEES_UID:-1000}:${HOBEES_GID:-1000} "
-        "/workspace/output /workspace/skills /workspace/postgres_data"
+        "/workspace/output /workspace/skills"
     )
     assert init["user"] == "0:0"
     assert init["volumes"] == [".:/workspace"]
@@ -243,11 +250,45 @@ def test_init_dirs_prepares_the_mounted_folders_before_anything_runs():
 
     # Only the folders the compose file bind-mounts, in mount order.
     typed = container_prep.ContainerSpec(goal="x", volumes=["./cache:/home/hobees/cache", "./skills:/home/hobees/skills"])
-    assert typed.host_dirs() == ["cache", "skills", "postgres_data"]
+    assert typed.host_dirs() == ["cache", "skills"]
+    assert typed.named_volumes() == ["postgres_data"]
+    # A volume typed as a host folder is still prepared by init-dirs.
+    bind = container_prep.ContainerSpec(goal="x", db_volume="./pgdata")
+    assert bind.host_dirs() == ["output", "skills", "pgdata"]
+    assert bind.named_volumes() == []
     # A named volume has no host folder to create, so the service is not needed at all.
     named = container_prep.ContainerSpec(goal="x", volumes=["artifacts:/data/artifacts"], include_db=False)
     assert named.host_dirs() == []
     assert "init-dirs" not in yaml.safe_load(container_prep.compose_yaml(named))["services"]
+
+
+def test_named_volumes_are_declared_at_the_bottom_of_the_file():
+    text = container_prep.compose_yaml(reference_spec())
+    parsed = yaml.safe_load(text)
+
+    # The block is the last thing in the file, after the commented-out web service.
+    assert text.rstrip().endswith("volumes:\n  postgres_data:")
+    assert parsed["volumes"] == {"postgres_data": None}
+
+    # Names appear in the order the services mount them, once each.
+    both = container_prep.ContainerSpec(
+        goal="x", volumes=["artifacts:/data/artifacts", "./skills:/home/hobees/skills", "artifacts:/data/scratch"]
+    )
+    assert both.named_volumes() == ["artifacts", "postgres_data"]
+    assert container_prep.volumes_block(both).split("\n") == ["volumes:", "  artifacts:", "  postgres_data:"]
+
+    # A file that only bind-mounts host folders needs no top-level block.
+    bind_only = container_prep.ContainerSpec(goal="x", include_db=False)
+    assert bind_only.named_volumes() == []
+    assert container_prep.volumes_block(bind_only) == ""
+    _, warnings = container_prep.validate_compose(container_prep.compose_yaml(bind_only))
+    assert not warnings
+
+    # A volume mounted without being declared is reported.
+    _, warnings = container_prep.validate_compose(
+        "services:\n  app:\n    image: app\n    volumes:\n      - pgdata:/var/lib/postgresql/data\n"
+    )
+    assert any("not declared" in warning for warning in warnings)
 
 
 def test_default_spec_uses_the_current_settings(tmp_path, monkeypatch):

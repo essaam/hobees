@@ -298,6 +298,13 @@ def test_containers_tab_runs_the_goal_from_a_file_or_pipe():
     assert "The exit code is how a pipeline learns the outcome" in studio
     assert "State.ExitCode" in studio
     assert "hobees pipeline status" in studio
+    # Postgres data is a Docker volume, so it is declared in the top-level block at the bottom
+    # of the file instead of being a host folder init-dirs creates.
+    assert "const namedVolumes = () => {" in studio
+    assert "docker compose down -v" in studio
+    # The volumes field accepts both kinds, which is what decides whether a mount is prepared
+    # by init-dirs or declared as a volume.
+    assert "Volumes (host:container or volume:container, comma-separated)" in studio
     assert "Download all files" in studio
 
 def test_preview_refreshes_the_run_command_with_the_settings():

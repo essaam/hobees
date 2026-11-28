@@ -556,16 +556,19 @@ Studio extras:
   `compose.yaml`, `Dockerfile`, `hobees.yaml` (the active configuration), `goal.txt` and
   `docker-entrypoint.sh`, in the shape of the set that is known to run against Docker.
   `init-dirs` runs first as root, creates the folders the bind mounts point at (`./output`,
-  `./skills`, `./postgres_data`) and hands them to `HOBEES_UID:HOBEES_GID`; the goal runner then
+  `./skills`) and hands them to `HOBEES_UID:HOBEES_GID`; the goal runner then
   waits for it and for a healthy Postgres. The `Dockerfile` follows the tested one — `uv tool install hobees` from
   PyPI, no source tree in the image — and the entrypoint initializes the schema with the copied
   config, then runs the goal. The goal reaches the container as a **read-only mount** (default, so
   the goal can change per run without a rebuild), a **baked `COPY`** (opt-in), or **stdin**, and the
   prompt text is never written into the script, so it can never be read as shell. Running the web
   app inside the container is optional and stays commented out by default. Generated paths are
-  relative (`./output`, `./skills`, `./goal.txt`, `./postgres_data`, `./.env`) and the container name is read
-  at run time, so nothing from one machine is baked into a committed file; the Postgres data folder is a
-  project folder rather than a named volume so `init-dirs` can prepare it. The Postgres service key and the
+  relative (`./output`, `./skills`, `./goal.txt`, `./.env`) and the container name is read
+  at run time, so nothing from one machine is baked into a committed file. Postgres keeps its data in a
+  **named Docker volume** (`postgres_data`), declared in the top-level `volumes:` block at the bottom of
+  `compose.yaml` rather than in a host folder — Postgres owns it, `init-dirs` has nothing to prepare, and the
+  data survives `docker compose down`; `docker compose down -v` is what removes it. A volume typed as a host
+  path (`./pgdata`) still works and is still prepared by `init-dirs`. The Postgres service key and the
   host name the container resolves come from the same field, so they cannot drift apart, and the ids baked
   into the image (`--uid 1000 --gid 1000`) are the defaults `.env` maps the host user onto. Env values stay
   `${NAME}` references, and the tab also generates **`.env.sample`** in the sections `.env` carries them in

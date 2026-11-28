@@ -740,7 +740,7 @@ function ContainersTab({ readOnly }: { readOnly: boolean }) {
     api_key_envs: plan?.spec.api_key_envs ?? [],
     include_db: fields.include_db,
     db_image: plan?.spec.db_image ?? 'postgres:16-alpine',
-    db_volume: plan?.spec.db_volume ?? './postgres_data',
+    db_volume: plan?.spec.db_volume ?? 'postgres_data',
     db_name: plan?.spec.db_name ?? 'hobeesdb',
     db_user: plan?.spec.db_user ?? 'hobees',
     postgres_service_name: fields.postgres_service_name,
@@ -811,7 +811,6 @@ function ContainersTab({ readOnly }: { readOnly: boolean }) {
     setOutput(`Downloaded ${items.length} file${items.length === 1 ? '' : 's'} separately`);
   };
 
-  // `docker compose run` starts a service from a profile, so the command follows the
   // The host folders compose bind-mounts: init-dirs creates them and chowns them to the
   // container user, so a run on a new machine needs only .env, not a manual mkdir.
   const preparedDirs = () => {
@@ -819,9 +818,20 @@ function ContainersTab({ readOnly }: { readOnly: boolean }) {
       .map((mount) => mount.split(':')[0])
       .filter((host) => host.startsWith('./'))
       .map((host) => host.slice(2).split('/')[0]);
-    const dbVolume = plan?.spec.db_volume ?? './postgres_data';
+    const dbVolume = plan?.spec.db_volume ?? 'postgres_data';
     if (fields.include_db && dbVolume.startsWith('./')) hosts.push(dbVolume.slice(2).split('/')[0]);
     return hosts.filter(Boolean);
+  };
+
+  // A bare name is a Docker volume, not a host folder, so init-dirs cannot prepare it: it is
+  // declared in the top-level `volumes:` block at the bottom of compose.yaml instead.
+  const namedVolumes = () => {
+    const isName = (source: string) =>
+      Boolean(source) && source !== '.' && source !== '..' && !source.startsWith('./') && !source.includes('/') && !source.includes('\\');
+    const names = list(fields.volumes).map((mount) => mount.split(':')[0]).filter(isName);
+    const dbVolume = plan?.spec.db_volume ?? 'postgres_data';
+    if (fields.include_db && isName(dbVolume) && !names.includes(dbVolume)) names.push(dbVolume);
+    return names;
   };
 
   // `docker compose run` starts a service from a profile, so the command follows the
@@ -875,7 +885,7 @@ function ContainersTab({ readOnly }: { readOnly: boolean }) {
         <Field label="Postgres service name (the compose key and the host the container resolves)">
           <input value={fields.postgres_service_name} onChange={(e) => setFields((prev) => ({ ...prev, postgres_service_name: e.target.value }))} readOnly={readOnly} className="w-full rounded-lg border border-zinc-200 px-3 py-2 font-mono text-xs" />
         </Field>
-        <Field label="Volumes (host:container, comma-separated)">
+        <Field label="Volumes (host:container or volume:container, comma-separated)">
           <input value={fields.volumes} onChange={(e) => setFields((prev) => ({ ...prev, volumes: e.target.value }))} readOnly={readOnly} className="w-full rounded-lg border border-zinc-200 px-3 py-2 font-mono text-xs" />
         </Field>
         <Field label="Command args (override only - the entrypoint script decides what runs)">
@@ -978,6 +988,13 @@ function ContainersTab({ readOnly }: { readOnly: boolean }) {
                 <span className="font-mono">init-dirs</span> creates {preparedDirs().map((dir) => `./${dir}`).join(', ')} and hands them to
                 {' '}{plan?.spec.user ?? '${HOBEES_UID:-1000}:${HOBEES_GID:-1000}'} before
                 {' '}{fields.service} starts, so the bind mounts are writable without a rebuild.
+              </div>
+            )}
+            {namedVolumes().length > 0 && (
+              <div className="mt-1 text-zinc-500">
+                {namedVolumes().map((name) => <span key={name} className="font-mono">{name}</span>).join(', ')} are Docker volumes, so
+                {' '}they are declared in the <span className="font-mono">volumes:</span> block at the bottom of compose.yaml instead of being
+                {' '}created on the host; <span className="font-mono">docker compose down -v</span> is what removes them.
               </div>
             )}
           </div>

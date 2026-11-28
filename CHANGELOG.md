@@ -87,13 +87,16 @@ to a heading matching that version and add the release date.
 - Containers: the generated set now follows the files that are known to run against Docker, field for
   field, and writes them on **Update spec**.
   `compose.yaml` starts with an `init-dirs` service (alpine, running as root) that creates the folders the
-  bind mounts point at - `./output`, `./skills`, `./postgres_data` - and chowns them to
+  bind mounts point at - `./output`, `./skills` - and chowns them to
   `HOBEES_UID:HOBEES_GID` before the goal runner and Postgres start; both `depends_on` it with
   `service_completed_successfully`. The goal runner keeps `init: true`, `extra_hosts` for
   `host.docker.internal` (so a `host.docker.internal` base_url resolves), `restart: "no"` and the profile,
-  and Postgres keeps its data in a project folder rather than a named volume and reads `./.env` instead of
-  an inline `environment:` block, with the healthcheck quoting `$${POSTGRES_USER}`/`$${POSTGRES_DB}` so the
-  container shell expands them.
+  and Postgres keeps its data in the named Docker volume `postgres_data`, declared in the top-level
+  `volumes:` block at the bottom of the file (there is no host folder for `init-dirs` to prepare, Postgres owns
+  the volume, and the data survives `docker compose down` - `docker compose down -v` removes it). A volume
+  typed as a host path is still prepared by `init-dirs`, and a named volume mounted without being declared is
+  reported as a warning. Postgres reads `./.env` instead of an inline `environment:` block, with the
+  healthcheck quoting `$${POSTGRES_USER}`/`$${POSTGRES_DB}` so the container shell expands them.
   The image creates the user with the ids `.env` maps the host onto (1000/1000, not 10001), installs hobees
   into `/opt/uv-tools` with `UV_TOOL_BIN_DIR=/usr/local/bin`, and copies `hobees.yaml` and
   `docker-entrypoint.sh` under the home directory; the script then keeps the same four numbered steps
