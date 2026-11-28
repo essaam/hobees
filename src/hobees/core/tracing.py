@@ -25,6 +25,13 @@ from pydantic import BaseModel, Field
 
 logger = logging.getLogger(__name__)
 
+
+def trace_filename(thread_id: str) -> str:
+    """Return a platform-safe JSONL filename for a namespaced thread ID."""
+    from hobees.core.paths import safe_path_component
+
+    return f"{safe_path_component(thread_id)}.jsonl"
+
 _SENSITIVE_KEY = re.compile(
     r"(?:api[_-]?key|access[_-]?token|refresh[_-]?token|authorization|password|passwd|secret|credential)",
     re.IGNORECASE,
@@ -123,7 +130,7 @@ def emit_trace_event(
         update={"payload": _sanitize_trace_value(event.payload)}
     )
     if traces_dir is not None:
-        trace_file = Path(traces_dir) / f"{event.thread_id}.jsonl"
+        trace_file = Path(traces_dir) / trace_filename(event.thread_id)
         try:
             trace_file.parent.mkdir(parents=True, exist_ok=True)
             with trace_file.open("a", encoding="utf-8") as f:
@@ -190,7 +197,7 @@ class HiveTraceCallbackHandler(BaseCallbackHandler):
         self.traces_dir = Path(traces_dir) if traces_dir else None
         if self.traces_dir:
             self.traces_dir.mkdir(parents=True, exist_ok=True)
-            self.trace_file = self.traces_dir / f"{self.thread_id}.jsonl"
+            self.trace_file = self.traces_dir / trace_filename(self.thread_id)
         else:
             self.trace_file = None
 

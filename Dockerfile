@@ -1,31 +1,26 @@
-ARG UV_VERSION=0.8.15
-FROM ghcr.io/astral-sh/uv:${UV_VERSION} AS uv
-
 FROM python:3.12-slim
 
-COPY --from=uv /uv /uvx /bin/
+ENV PYTHONUNBUFFERED=1 \
+    PYTHONDONTWRITEBYTECODE=1
 
-ENV UV_PROJECT_ENVIRONMENT=/opt/venv \
-    UV_COMPILE_BYTECODE=1 \
-    UV_LINK_MODE=copy \
-    PATH="/opt/venv/bin:${PATH}" \
-    PYTHONUNBUFFERED=1
+# 1. Install uv system-wide as root
+RUN pip install --no-cache-dir uv
 
-WORKDIR /app
-
-COPY pyproject.toml uv.lock README.md ./
-RUN uv sync --frozen --no-dev --no-install-project
-
-COPY src ./src
-RUN uv sync --frozen --no-dev
-
+# 2. Create the non-root user and data directories first
 RUN groupadd --system --gid 10001 hobees \
     && useradd --system --uid 10001 --gid hobees --home-dir /home/hobees --create-home hobees \
     && mkdir -p /data/artifacts /data/skills \
     && chown -R hobees:hobees /data /home/hobees
 
-ENV HOME=/tmp
-USER hobees:hobees
+# 3. Switch to user space BEFORE running uv commands
+USER hobees
+WORKDIR /home/hobees
+
+# 4. Add the user's local bin directory to PATH
+ENV PATH="/home/hobees/.local/bin:${PATH}"
+
+# 5. Install from PyPi
+RUN uv tool install hobees
 
 ENTRYPOINT ["hobees"]
-CMD ["--help"]
+CMD ["web", "--host", "0.0.0.0", "--port", "6543"]

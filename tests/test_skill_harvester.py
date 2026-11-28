@@ -172,7 +172,8 @@ def test_one_shot_prompt_harvests_completed_run(monkeypatch, tmp_path):
     harvested_run_ids = []
     monkeypatch.setattr(
         "hobees.core.hive_builder.hive_app",
-        lambda *args: hive_app_calls.append(args) or _SyncHiveContext(),
+        lambda *args, approval_mode=None: hive_app_calls.append((args, approval_mode))
+        or _SyncHiveContext(),
     )
     monkeypatch.setattr(
         "hobees.core.memory_manager.extract_run_memories",
@@ -191,7 +192,7 @@ def test_one_shot_prompt_harvests_completed_run(monkeypatch, tmp_path):
             run = session.query(Run).filter_by(goal="Run a one-shot task").one()
             assert run.status == "completed"
             assert run.completed_at is not None
-            assert hive_app_calls[0][5] == run.id
+            assert hive_app_calls[0][0][5] == run.id
             assert harvested_run_ids == [run.id]
     finally:
         engine.dispose()
@@ -205,7 +206,8 @@ def test_shell_goal_harvests_completed_run(monkeypatch, tmp_path):
     monkeypatch.setattr(
         shell,
         "hive_app",
-        lambda *args: hive_app_calls.append(args) or _SyncHiveContext(),
+        lambda *args, approval_mode=None: hive_app_calls.append((args, approval_mode))
+        or _SyncHiveContext(),
     )
     monkeypatch.setattr(
         "hobees.core.memory_manager.extract_run_memories",
@@ -224,13 +226,20 @@ def test_shell_goal_harvests_completed_run(monkeypatch, tmp_path):
         with session_scope() as session:
             provider = session.get(LLMProvider, provider_id)
 
-        shell._handle_goal(["Run", "a", "shell", "goal"], provider, str(engine.url), {})
+        shell._handle_goal(
+            ["Run", "a", "shell", "goal"],
+            provider,
+            engine.url,
+            {"approval_mode": "auto"},
+        )
 
         with session_scope() as session:
             run = session.query(Run).filter_by(goal="Run a shell goal").one()
             assert run.status == "completed"
             assert run.completed_at is not None
-            assert hive_app_calls[0][5] == run.id
+            assert hive_app_calls[0][0][5] == run.id
+            # The session approval level must reach the graph, not just the UI.
+            assert hive_app_calls[0][1] == "auto"
             assert harvested_run_ids == [run.id]
     finally:
         engine.dispose()
@@ -320,7 +329,7 @@ def test_shell_hive_chat_harvests_the_completed_session(monkeypatch, tmp_path):
             shell._chat_with_hive(
                 "interactive-hive",
                 provider,
-                str(engine.url),
+                engine.url,
                 {},
             )
         )

@@ -21,6 +21,7 @@ from typing import Any
 
 from langchain.agents import create_agent
 from langchain_core.tools import tool
+from sqlalchemy.engine import URL
 
 from hobees.core.hive_builder import hive_app
 from hobees.core.llm_factory import get_chat_model
@@ -59,7 +60,7 @@ class Queen:
         self,
         provider: LLMProvider,
         model_name: str,
-        db_url: str,
+        db_url: str | URL,
         thread_id: str | None = None,
         thinking_level: str = "medium",
     ) -> None:
@@ -219,7 +220,7 @@ class Queen:
 def build_queen(
     provider: LLMProvider,
     model_name: str,
-    db_url: str,
+    db_url: str | URL,
     thread_id: str | None = None,
     thinking_level: str = "medium",
 ) -> Queen:

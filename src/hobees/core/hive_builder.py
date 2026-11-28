@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import inspect
 import re
+import sys
 import time
 import uuid
 from collections.abc import Awaitable, Callable
@@ -24,6 +25,7 @@ from pathlib import Path
 from typing import Iterator
 
 from langchain_core.runnables import RunnableConfig
+from sqlalchemy.engine import URL
 
 from hobees.core.llm_factory import get_chat_model
 from hobees.core.telemetry import TelemetryCallbackHandler
@@ -55,11 +57,13 @@ def _build_hive_graph(
     hive: Hive,
     bees: list[Bee],
     providers: dict[int, LLMProvider],
-    db_url: str,
+    db_url: str | URL,
     thread_id: str,
     run_id: int | None = None,
     session_override_thinking: str | None = None,  # v1.1: session-wide thinking override
     artifact_root: str | Path | None = None,
+    approval_mode: str | None = None,
+    container_name: str | None = None,
 ):
     """Build the shared Hive graph and return its run context."""
     from langchain.agents import create_agent
@@ -68,6 +72,10 @@ def _build_hive_graph(
     from langchain_core.runnables.config import merge_configs
     from langchain_core.tools import StructuredTool
     from langgraph.graph import END, START, MessagesState, StateGraph
+    from hobees.core.approval import (
+        ApprovalMiddleware,
+        resolve_approval_mode,
+    )
 
     class RequestTransformMiddleware(AgentMiddleware):
         def __init__(
@@ -91,8 +99,10 @@ def _build_hive_graph(
             return await handler(self.transform(request))
 
     # Build thread_id for this run
+    from hobees.core.approval import resolve_container_name, resolve_thread_id
+    container_name = resolve_container_name(container_name)
     if not thread_id:
-        thread_id = uuid.uuid4().hex
+        thread_id = resolve_thread_id("hive", hive.name, container_name=container_name)
 
     # Set thread context for tool truncation and project root (artifacts directory)
     from hobees.core.tool_registry import set_thread_context
@@ -108,7 +118,9 @@ def _build_hive_graph(
     elif hasattr(hive, "project_path") and hive.project_path:
         project_root = Path(hive.project_path)
     else:
-        project_root = settings.artifacts_root / hive.name
+        from hobees.core.paths import safe_path_component
+
+        project_root = settings.artifacts_root / safe_path_component(hive.name)
 
     project_root.mkdir(parents=True, exist_ok=True)
     (project_root / "output").mkdir(parents=True, exist_ok=True)
@@ -234,6 +246,7 @@ def _build_hive_graph(
                     provider_alias=provider.alias,
                     model_name=bee.model_name,
                     thread_id=thread_id,
+                    container_name=container_name,
                     run_id=run_id,
                     rates={
                         provider.alias: (
@@ -318,7 +331,21 @@ def _build_hive_graph(
         worker_agent = create_agent(
             model=model,
             tools=get_tools(bee.tool_names),
-            middleware=[worker_prompt_middleware(make_worker_prompt)],
+            middleware=[
+                worker_prompt_middleware(make_worker_prompt),
+                ApprovalMiddleware(
+                    bee_name=bee.name,
+                    hive_name=hive.name,
+                    thread_id=thread_id,
+                    container_name=container_name,
+                    approval_mode=(
+                        approval_mode
+                        if approval_mode in {"interactive", "auto", "strict", "pause"}
+                        else resolve_approval_mode(interactive=sys.stdin.isatty())
+                    ),
+                    require_approval=getattr(bee, "require_approval", None),
+                ),
+            ],
             name=bee.name,
         )
         delegation_tools.append(
@@ -343,6 +370,7 @@ def _build_hive_graph(
                 provider_alias=supervisor_provider.alias,
                 model_name=hive.supervisor_model_name,
                 thread_id=thread_id,
+                container_name=container_name,
                 run_id=run_id,
                 rates={
                     supervisor_provider.alias: (
@@ -416,7 +444,12 @@ def _build_hive_graph(
     graph.add_edge(START, "supervisor")
     graph.add_edge("supervisor", END)
 
-    return graph, thread_id, project_root, traces_dir, str(db_url)
+    # Rendered with the password intact: `str(db_url)` would write `***` and the
+    # checkpointer would then try to authenticate with that, while SQLAlchemy - holding the
+    # URL object - connects fine. See hobees.db.backends.render_db_url.
+    from hobees.db.backends import render_db_url
+
+    return graph, thread_id, project_root, traces_dir, render_db_url(db_url)
 
 
 def _emit_hive_event(
@@ -452,11 +485,13 @@ def hive_app(
     hive: Hive,
     bees: list[Bee],
     providers: dict[int, LLMProvider],
-    db_url: str,
+    db_url: str | URL,
     thread_id: str,
     run_id: int | None = None,
     session_override_thinking: str | None = None,
     artifact_root: str | Path | None = None,
+    approval_mode: str | None = None,
+    container_name: str | None = None,
 ) -> Iterator[object]:
     """Yield a Hive graph with synchronous checkpoints."""
     from hobees.db.backends import get_database_backend, get_postgres_checkpoint_url
@@ -464,7 +499,7 @@ def hive_app(
     backend = get_database_backend(db_url)
     graph, thread_id, project_root, traces_dir, db_url_str = _build_hive_graph(
         hive, bees, providers, db_url, thread_id, run_id,
-        session_override_thinking, artifact_root,
+        session_override_thinking, artifact_root, approval_mode, container_name,
     )
 
     _emit_hive_event("HIVE_START", hive, thread_id, run_id, project_root, traces_dir)
@@ -505,11 +540,13 @@ async def hive_app_async(
     hive: Hive,
     bees: list[Bee],
     providers: dict[int, LLMProvider],
-    db_url: str,
+    db_url: str | URL,
     thread_id: str,
     run_id: int | None = None,
     session_override_thinking: str | None = None,
     artifact_root: str | Path | None = None,
+    approval_mode: str | None = None,
+    container_name: str | None = None,
 ):
     """Yield a Hive graph with asynchronous, persistent checkpoints."""
     from hobees.db.backends import get_database_backend, get_postgres_checkpoint_url
@@ -517,7 +554,7 @@ async def hive_app_async(
     backend = get_database_backend(db_url)
     graph, thread_id, project_root, traces_dir, db_url_str = _build_hive_graph(
         hive, bees, providers, db_url, thread_id, run_id,
-        session_override_thinking, artifact_root,
+        session_override_thinking, artifact_root, approval_mode, container_name,
     )
 
     _emit_hive_event("HIVE_START", hive, thread_id, run_id, project_root, traces_dir)

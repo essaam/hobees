@@ -62,6 +62,7 @@ class TUIState:
     """State for the TUI application."""
     active_hive: Optional[str] = None
     thinking_override: str = "auto"  # auto | off | low | medium | high
+    approval_mode: Optional[str] = None
     thread_id: Optional[str] = None
     provider: Optional[LLMProvider] = None
     db_url: Optional[str] = None
@@ -553,6 +554,16 @@ class HobeesTUI:
             self.app.invalidate()
             return
             
+        if cmd in ("approvals", "permissions"):
+            from hobees.cli.approval_cmd import STYLE_OF, handle
+
+            kind, message, new_level = handle(
+                args, self.state.approval_mode, interactive=True
+            )
+            self.state.approval_mode = new_level
+            self._add_output(STYLE_OF[kind], message)
+            return
+
         if cmd == "thinking":
             if not args:
                 self._add_output("info", f"Current thinking: {self.state.thinking_override}")
@@ -1126,6 +1137,7 @@ class HobeesTUI:
         from hobees.core.memory_manager import extract_namespaces, build_memory_block
         from hobees.core.tool_registry import get_skill_metadata
         from langchain.agents import create_agent
+        from hobees.core.approval import ApprovalMiddleware, resolve_approval_mode
         from hobees.cli.shell import _get_or_create_assistant
 
         # Get or create assistant bee
@@ -1182,6 +1194,10 @@ class HobeesTUI:
             thinking_level=thinking_level,
         )
         tools = get_tools(assistant.tool_names)
+        approval_mode = resolve_approval_mode(
+            session_mode=self.state.approval_mode,
+            interactive=True,
+        )
 
         memory_namespaces = extract_namespaces(global_=True, bee_name=assistant.name)
         memory_block = build_memory_block(memory_namespaces)
@@ -1217,6 +1233,16 @@ class HobeesTUI:
                 system_prompt=full_system_prompt,
                 name=assistant.name,
                 checkpointer=saver,
+                middleware=[
+                    ApprovalMiddleware(
+                        bee_name=assistant.name,
+                        hive_name=None,
+                        thread_id=thread_id,
+                        container_name="local",
+                        approval_mode=approval_mode,
+                        require_approval=assistant.require_approval,
+                    )
+                ],
             )
 
             self._add_output("user", user_input)
@@ -1459,7 +1485,12 @@ class HobeesTUI:
             
         full_system_prompt = "\n\n".join(system_prompt_parts) if system_prompt_parts else None
         
+        from hobees.core.approval import ApprovalMiddleware, resolve_approval_mode
         from hobees.cli.shell import _get_async_checkpointer
+        approval_mode = resolve_approval_mode(
+            session_mode=self.state.approval_mode,
+            interactive=True,
+        )
         saver, checkpoint_stack = await _get_async_checkpointer(self.state.db_url)
         try:
             agent = create_agent(
@@ -1468,6 +1499,16 @@ class HobeesTUI:
                 system_prompt=full_system_prompt,
                 name=bee.name,
                 checkpointer=saver,
+                middleware=[
+                    ApprovalMiddleware(
+                        bee_name=bee.name,
+                        hive_name=self.state.active_hive,
+                        thread_id=thread_id,
+                        container_name="local",
+                        approval_mode=approval_mode,
+                        require_approval=bee.require_approval,
+                    )
+                ],
             )
         except BaseException:
             await checkpoint_stack.aclose()
@@ -1611,6 +1652,7 @@ class HobeesTUI:
                 thread_id,
                 run_id,
                 thinking_override,
+                approval_mode=self.state.approval_mode,
             ) as app:
                 streamer = DeltaStreamer()
                 await self._stream_into_buffer(streamer, app, text, thread_id)
@@ -1764,6 +1806,25 @@ class HobeesTUI:
         self.state.cancel_task = False
         return streamer.text
         
+    def _apply_session_context(self, ctx_obj: dict | None) -> None:
+        """Seed TUI state from the CLI context (session, hive, approval level)."""
+        if not ctx_obj:
+            return
+        if ctx_obj.get("resume_session"):
+            from hobees.cli.shell import _load_session
+
+            name = ctx_obj["resume_session"]
+            data = _load_session(name)
+            if data:
+                self.state.active_hive = data.get("active_hive")
+                self.state.thread_id = data.get("thread_id")
+                if data.get("approval_mode"):
+                    self.state.approval_mode = data["approval_mode"]
+        elif ctx_obj.get("active_hive"):
+            self.state.active_hive = ctx_obj["active_hive"]
+        if ctx_obj.get("approval_mode"):
+            self.state.approval_mode = ctx_obj["approval_mode"]
+
     def run(
         self,
         provider: LLMProvider | None,
@@ -1776,18 +1837,9 @@ class HobeesTUI:
         self.state.db_url = db_url
         if model_name:
             self.state.default_model = model_name
-        
+
         # Handle session resume
-        if ctx_obj:
-            if ctx_obj.get("resume_session"):
-                from hobees.cli.shell import _load_session
-                name = ctx_obj["resume_session"]
-                data = _load_session(name)
-                if data:
-                    self.state.active_hive = data.get("active_hive")
-                    self.state.thread_id = data.get("thread_id")
-            elif ctx_obj.get("active_hive"):
-                self.state.active_hive = ctx_obj["active_hive"]
+        self._apply_session_context(ctx_obj)
         
         # Create app
         self.app = self._create_application()
@@ -1803,6 +1855,13 @@ class HobeesTUI:
             self._add_output("system", f"{APP} hobees Interactive Shell")
             self._add_output("info", "No provider selected. Use /provider add to add one.")
             self._add_output("info", "Type /help for commands")
+        from hobees.cli.approval_cmd import effective_level
+
+        level, source = effective_level(self.state.approval_mode, interactive=True)
+        self._add_output(
+            "info",
+            f"Approval level: {level} ({source}) — /approvals to change for this session",
+        )
         self._add_output(
             "info",
             "Output is selectable with terminal mouse selection; use the terminal's copy shortcut.",

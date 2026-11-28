@@ -1,11 +1,49 @@
 """Unit tests for Tool Registry and Tool Output Truncation."""
 
+from hobees.core.context_manager import MAX_TOOL_OUTPUT_CHARS
 from hobees.core.tool_registry import (
     TOOL_REGISTRY,
     get_tools,
     run_python_calc,
     set_thread_context,
+    unknown_tool_names,
 )
+
+
+def test_offloaded_output_can_be_read_back_with_the_path_the_model_was_shown(tmp_path):
+    long_output = "Z" * (MAX_TOOL_OUTPUT_CHARS + 300)
+    (tmp_path / "seed.txt").write_text(long_output, encoding="utf-8")
+    thread_key = "worker-1:hive:dev-team:91318583"
+
+    set_thread_context(thread_key, call_id="call_7", project_root=str(tmp_path))
+    preview = TOOL_REGISTRY["read_file"].invoke({"path": "seed.txt"})
+    assert "[... OUTPUT TRUNCATED" in preview
+
+    shown = preview.split("Full output saved to: ", 1)[1].split("\n", 1)[0]
+    assert ":" not in shown
+
+    again = TOOL_REGISTRY["read_file"].invoke({"path": shown})
+    assert not again.startswith("ERROR:")
+    assert again.startswith("ZZZ")
+    saved = tmp_path / "scratchpad" / "worker-1__hive__dev-team__91318583" / "call_7.txt"
+    assert saved.read_text(encoding="utf-8") == long_output
+
+
+def test_namespaced_thread_path_is_reported_as_an_error_not_raised(tmp_path):
+    set_thread_context("t", project_root=str(tmp_path))
+    result = TOOL_REGISTRY["read_file"].invoke(
+        {"path": "scratchpad/worker:hive:dev-team/c1.txt"}
+    )
+    assert result.startswith("ERROR:")
+
+
+def test_a_gate_on_an_unregistered_tool_can_never_fire():
+    # `get_tools()` skips unknown names, so a Bee can never be gated on a tool it
+    # cannot call. The docs example gated `run_shell`, which is not registered.
+    assert unknown_tool_names(["read_file", "write_file"]) == []
+    assert unknown_tool_names(["run_shell"]) == ["run_shell"]
+    assert unknown_tool_names(None) == []
+    assert get_tools(["run_shell"]) == []
 
 
 def test_tool_registry_registration():

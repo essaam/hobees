@@ -9,21 +9,26 @@ from __future__ import annotations
 
 import sys
 import uuid
+import json
 from collections.abc import Sequence
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Annotated
+from typing import Annotated, Any
 
 import typer
 from rich.console import Console
 from rich.markup import escape
 from rich.table import Table
+from sqlalchemy.engine import URL
 
 from hobees.cli.icons import APP, ERROR, SUCCESS, WARN
+from hobees.cli.approval_cmd import approvals_command
 from hobees.cli.bee_cmd import app as bee_app
 from hobees.cli.hive_cmd import app as hive_app
 from hobees.cli.provider_cmd import app as provider_app
 from hobees.cli.memory_cmd import app as memory_app
+from hobees.cli.pipeline_cmd import app as pipeline_app
+from hobees.cli.reset_cmd import reset_command
 from hobees.cli.skill_cmd import app as skill_app
 from hobees.cli.import_cmd import import_config
 
@@ -39,7 +44,38 @@ app.add_typer(bee_app, name="bee")
 app.add_typer(hive_app, name="hive")
 app.add_typer(memory_app, name="memory")
 app.add_typer(skill_app, name="skill")
+app.add_typer(pipeline_app, name="pipeline")
+# `/approvals` on the interactive side, `hobees approvals` headless; `permissions`
+# is accepted as an alias of both.
+app.command(name="approvals")(approvals_command)
+app.command(name="permissions")(approvals_command)
 app.command(name="import")(import_config)
+# `hobees reset` is headless only: the interactive shell and the TUI do not offer
+# a command that deletes the slate, so it stays out of the slash-command catalog.
+app.command(name="reset")(reset_command)
+
+
+def _approval_session_level(
+    level: str | None,
+    auto_approve: bool = False,
+) -> str | None:
+    """Validate a per-session `--approval-mode` value (no persistence)."""
+    from hobees.cli.approval_cmd import normalize_level
+
+    if auto_approve:
+        return "auto"
+    if level is None:
+        return None
+    normalized = normalize_level(level)
+    if normalized is None:
+        from hobees.core.approval import APPROVAL_MODES
+
+        console.print(
+            f"{ERROR} Invalid approval level: {level}. "
+            f"Choose {', '.join(APPROVAL_MODES)}."
+        )
+        raise typer.Exit(code=1)
+    return normalized
 
 
 def _version_callback(value: bool) -> None:
@@ -74,12 +110,21 @@ def _root(
     hive: str | None = typer.Option(
         None, "--hive", help="Hive to launch directly into for this session"
     ),
+    approval_mode: str | None = typer.Option(
+        None,
+        "--approval-mode",
+        help="Approval level for this session: interactive|auto|strict|pause",
+    ),
+    auto_approve: bool = typer.Option(
+        False, "--auto-approve", help="Convenience alias for --approval-mode auto"
+    ),
 ) -> None:
     """hobees — run with no arguments to enter the interactive shell."""
     if not ctx.resilient_parsing:
         from hobees.config import ensure_database_url, get_default_database_path, settings
 
-        if ensure_database_url():
+        # `reset` must not re-create the env file and database it is about to remove.
+        if ctx.invoked_subcommand != "reset" and ensure_database_url():
             database_path = escape(str(get_default_database_path()))
             console.print(
                 f"{WARN} HOBEES_DATABASE_URL is not set; using local SQLite "
@@ -87,7 +132,7 @@ def _root(
                 "Set HOBEES_DATABASE_URL to use another database."
             )
 
-        if ctx.invoked_subcommand not in ("init", "import") and settings.config_path:
+        if ctx.invoked_subcommand not in ("init", "import", "reset") and settings.config_path:
             _sync_startup_config(settings.config_path)
 
     # If no subcommand was invoked, run the shell
@@ -99,6 +144,7 @@ def _root(
             "default_provider": provider,
             "default_model": model,
             "active_hive": hive,
+            "approval_mode": _approval_session_level(approval_mode, auto_approve),
         }
         from hobees.db.session import get_engine, session_scope
         from hobees.db.models import LLMProvider
@@ -211,6 +257,9 @@ def _run_migrations(engine) -> None:
             if "thinking_level" not in columns:
                 conn.execute(text("ALTER TABLE bees ADD COLUMN thinking_level VARCHAR(16) DEFAULT 'off'"))
                 console.print(f"{SUCCESS} Added column: bees.thinking_level")
+            if "require_approval" not in columns:
+                conn.execute(text("ALTER TABLE bees ADD COLUMN require_approval JSON DEFAULT '[]'"))
+                console.print(f"{SUCCESS} Added column: bees.require_approval")
             conn.commit()
     
     # Check and add supervisor_thinking_level to hives
@@ -229,6 +278,8 @@ def _run_migrations(engine) -> None:
     if "runs" in inspector.get_table_names():
         columns = [c["name"] for c in inspector.get_columns("runs")]
         with engine.connect() as conn:
+            if "container_name" not in columns:
+                conn.execute(text("ALTER TABLE runs ADD COLUMN container_name VARCHAR(128)"))
             if "compacted_count" not in columns:
                 conn.execute(text("ALTER TABLE runs ADD COLUMN compacted_count INTEGER DEFAULT 0"))
                 console.print(f"{SUCCESS} Added column: runs.compacted_count")
@@ -244,6 +295,16 @@ def _run_migrations(engine) -> None:
                 console.print(f"{SUCCESS} Added column: runs.artifacts_dir")
             conn.commit()
         _migrate_json_column(engine, "runs", "suggested_skill_draft")
+
+    # Trace observability enrichment
+    if "usage_events" in inspector.get_table_names():
+        columns = [c["name"] for c in inspector.get_columns("usage_events")]
+        with engine.connect() as conn:
+            if "container_name" not in columns:
+                conn.execute(text("ALTER TABLE usage_events ADD COLUMN container_name VARCHAR(128)"))
+            if "checkpoint_id" not in columns:
+                conn.execute(text("ALTER TABLE usage_events ADD COLUMN checkpoint_id VARCHAR(128)"))
+            conn.commit()
     
     # Create new tables if they don't exist (memories, skills, bee_skills)
     # These will be created by Base.metadata.create_all() anyway
@@ -384,7 +445,7 @@ def _sync_startup_config(config_path: Path) -> None:
         raise typer.Exit(code=1) from exc
 
 
-def _setup_postgres_checkpointer(db_url) -> None:
+def _setup_postgres_checkpointer(db_url: str | URL) -> None:
     from hobees.db.backends import get_database_backend, get_postgres_checkpoint_url
 
     if get_database_backend(db_url) == "sqlite":
@@ -535,6 +596,142 @@ def init(
 
 
 @app.command()
+def trace(
+    thread: str | None = typer.Option(None, "--thread", "-t", help="Thread ID or short thread suffix"),
+    container: str | None = typer.Option(None, "--container", "-c", help="Container/instance name"),
+    hive: str | None = typer.Option(None, "--hive", help="Hive entity name"),
+    list_threads: bool = typer.Option(False, "--list", help="List recent threads"),
+    limit: int = typer.Option(20, "--limit", help="Maximum threads to list"),
+    output_json: bool = typer.Option(False, "--json", help="Emit structured JSON"),
+) -> None:
+    """Inspect namespaced runs and approval gates."""
+    from hobees.core.approval import resolve_container_name, resolve_thread_id
+    from hobees.core.tracing import trace_filename
+    from hobees.db.models import ApprovalEvent, Run, UsageEvent
+    from hobees.db.session import session_scope
+
+    container = resolve_container_name(container)
+
+    with session_scope() as session:
+        if list_threads:
+            query = session.query(Run)
+            if container:
+                query = query.filter(
+                    (Run.container_name == container) | (Run.container_name.is_(None))
+                )
+            if hive:
+                from hobees.db.models import Hive
+                hive_row = session.query(Hive).filter_by(name=hive).first()
+                if hive_row:
+                    query = query.filter(Run.hive_id == hive_row.id)
+            runs = query.order_by(Run.started_at.desc()).limit(limit).all()
+            rows = [
+                {
+                    "container": run.container_name or container,
+                    "thread": run.thread_id,
+                    "status": run.status,
+                    "goal": run.goal,
+                    "started_at": run.started_at.isoformat() if run.started_at else None,
+                }
+                for run in runs
+            ]
+            if output_json:
+                console.print_json(json.dumps(rows))
+            else:
+                table = Table(title="Recent Trace Threads")
+                table.add_column("Container")
+                table.add_column("Thread")
+                table.add_column("Status")
+                table.add_column("Goal")
+                for row in rows:
+                    table.add_row(row["container"], row["thread"], row["status"], row["goal"][:80])
+                console.print(table)
+            return
+
+        if not thread:
+            console.print(f"{ERROR} Specify --thread or --list")
+            raise typer.Exit(code=1)
+        resolved = resolve_thread_id(
+            "hive" if hive else "hive",
+            hive or "default",
+            thread,
+            container,
+        )
+
+        approvals = session.query(ApprovalEvent).filter_by(thread_id=resolved).all()
+        usage = session.query(UsageEvent).filter_by(thread_id=resolved).all()
+        run = session.query(Run).filter_by(thread_id=resolved).first()
+
+    trace_events = []
+    trace_roots = [Path.cwd() / "artifacts", Path.home() / ".hobees" / "artifacts"]
+    expected_name = trace_filename(resolved)
+    for root in trace_roots:
+        if root.exists():
+            for path in root.rglob(expected_name):
+                try:
+                    for line in path.read_text(encoding="utf-8").splitlines():
+                        if line.strip():
+                            trace_events.append(json.loads(line))
+                except (OSError, json.JSONDecodeError):
+                    continue
+
+    approval_rows = []
+    for event in approvals:
+        wait_ms = None
+        if event.resolved_at and event.requested_at:
+            wait_ms = int((event.resolved_at - event.requested_at).total_seconds() * 1000)
+        approval_rows.append({
+            "checkpoint_id": event.checkpoint_id,
+            "bee": event.bee_name,
+            "tool": event.tool_name,
+            "tool_call_id": event.tool_call_id,
+            "mode": event.approval_mode,
+            "decision": event.decision,
+            "wait_ms": wait_ms,
+            "original_args": json.loads(event.original_args_json or "{}"),
+            "final_args": json.loads(event.final_args_json) if event.final_args_json else None,
+            "reason": event.reason,
+        })
+
+    usage_rows = [
+        {
+            "bee": item.bee_name,
+            "model": item.model_name,
+            "latency_ms": item.latency_ms,
+            "input_tokens": item.input_tokens,
+            "output_tokens": item.output_tokens,
+            "checkpoint_id": item.checkpoint_id,
+        }
+        for item in usage
+    ]
+    result = {
+        "container": container,
+        "thread": resolved,
+        "status": run.status if run else ("awaiting_approval" if approvals and any(a.decision == "pending" for a in approvals) else "unknown"),
+        "checkpoints": [],
+        "events": trace_events,
+        "approvals": approval_rows,
+        "usage": usage_rows,
+    }
+    if output_json:
+        console.print_json(json.dumps(result))
+    else:
+        console.print(f"[bold]Thread:[/bold] {resolved}")
+        console.print(f"[bold]Status:[/bold] {result['status']}")
+        for approval in approval_rows:
+            console.print(
+                f"  GATE {approval['mode']}: {approval['tool']} "
+                f"[{approval['decision']}] bee={approval['bee']}"
+            )
+        for event in trace_events:
+            console.print(
+                f"  [{event.get('event_type')}] "
+                f"{event.get('source')}"
+                f"{' -> ' + event.get('target') if event.get('target') else ''}"
+            )
+
+
+@app.command()
 def stats(
     window: str = typer.Option("all", "--window", "-w", help="Time window: 1h, 24h, 7d, all"),
     group_by: str = typer.Option("bee", "--group-by", "-g", help="Group by: bee, hive, provider, day"),
@@ -630,16 +827,71 @@ def serve(
 
 
 @app.command()
+def web(
+    port: int = typer.Option(6543, "--port", "-p", help="Web UI bind port"),
+    host: str = typer.Option("127.0.0.1", "--host", "-h", help="Web UI bind host"),
+    open_browser: bool = typer.Option(False, "--open", help="Open browser on startup"),
+    read_only: bool = typer.Option(False, "--read-only", help="Disable mutating endpoints"),
+) -> None:
+    """Launch the hobees Web UI (Workbench, Studio & Trace Explorer)."""
+    import threading
+    import webbrowser
+    import uvicorn
+    from hobees.db.session import get_engine
+    from hobees.web.app import create_web_app
+
+    _ensure_database_initialized(get_engine())
+
+    display_host = "127.0.0.1" if host in {"0.0.0.0", "::"} else host
+    url = f"http://{display_host}:{port}"
+    console.print(f"{APP} Starting hobees Web UI on http://{host}:{port}")
+
+    if read_only:
+        console.print(f"  {WARN} Read-only mode enabled — mutating endpoints disabled.")
+    elif host not in {"127.0.0.1", "localhost", "::1"}:
+        console.print(
+            f"  {WARN} [bold yellow]Security Warning:[/bold yellow] Binding to {host} without --read-only. "
+            "Place this dashboard behind authentication (reverse proxy / VPN) because approving "
+            "tool calls or running hives can execute file writes or commands."
+        )
+
+    web_app = create_web_app(read_only=read_only)
+
+    if open_browser:
+        threading.Timer(0.8, lambda: webbrowser.open(url)).start()
+
+    uvicorn.run(web_app, host=host, port=port, log_level="info")
+
+
+@app.command()
 def prompt(
-    goal: str = typer.Argument(..., help="Goal to execute in single-shot print mode"),
+    goal: str = typer.Argument(
+        None,
+        help="Goal to execute in single-shot print mode, or `-` to read it from stdin",
+    ),
     provider: str = typer.Option(None, "--provider", help="Provider alias to use"),
     model: str = typer.Option(None, "--model", help="Model name to use"),
     thinking: str = typer.Option("medium", "--thinking", help="Thinking level: off, low, medium, high"),
+    approval_mode: str = typer.Option(None, "--approval-mode", help="interactive|auto|strict|pause"),
+    # Last, so `prompt(goal, provider, model, thinking)` positional calls keep working.
+    goal_file: str = typer.Option(None, "--goal-file", help="Read the goal from a file (or - for stdin)"),
 ) -> None:
-    """Execute a single goal non-interactively and exit (`-p` alias)."""
+    """Execute a single goal non-interactively and exit (`-p` alias).
+
+    The goal may also arrive from `--goal-file <path>` or a pipe, which is what makes
+    a container/CI step readable when the prompt is long.
+    """
+    from hobees.cli.goal_input import require_goal, resolve_goal
     from hobees.db.session import get_engine, session_scope
     from hobees.db.models import LLMProvider, Bee, Hive, HiveMembership, Run
     from hobees.core.hive_builder import hive_app
+    from hobees.cli.approval_cmd import normalize_level
+
+    goal = require_goal(resolve_goal(goal, goal_file))
+
+    # Only a real level string is trusted; anything else falls back to the
+    # context default inside the graph.
+    approval_level = normalize_level(approval_mode) if isinstance(approval_mode, str) else None
     
     engine = get_engine()
     db_url = engine.url
@@ -712,13 +964,26 @@ def prompt(
             run_id = run.id
         providers_dict = {p.id: p for p in providers}
         
-        with hive_app(hive, bees, providers_dict, db_url, thread_id, run_id, thinking) as app:
+        with hive_app(
+            hive,
+            bees,
+            providers_dict,
+            db_url,
+            thread_id,
+            run_id,
+            thinking,
+            approval_mode=approval_level,
+        ) as app:
             result = app.invoke(
                 {"messages": [("user", goal)]},
                 config={"configurable": {"thread_id": thread_id}},
             )
         output = str(result)
         messages = result.get("messages", []) if isinstance(result, dict) else []
+        # An approval interrupt means the goal was not finished - a headless run cannot answer it,
+        # so the pipeline must see a non-zero code instead of a plain "completed".
+        interrupts = result.get("__interrupt__", []) if isinstance(result, dict) else []
+        status = "awaiting_approval" if interrupts else "completed"
         memory_output = (
             str(getattr(messages[-1], "content", messages[-1]))
             if messages
@@ -727,7 +992,7 @@ def prompt(
         with session_scope() as session:
             run = session.get(Run, run_id)
             if run:
-                run.status = "completed"
+                run.status = status
                 run.completed_at = datetime.now(timezone.utc)
         from hobees.core.memory_manager import extract_run_memories
 
@@ -743,6 +1008,11 @@ def prompt(
         from hobees.core.skill_harvester import harvest_completed_run
 
         skill_draft = harvest_completed_run(run_id)
+        if status != "completed":
+            console.print(f"{WARN} Goal stopped for approval ({len(interrupts)} pending decision(s))")
+            from hobees.core.pipeline_status import pipeline_exit_code
+
+            raise typer.Exit(code=pipeline_exit_code(status))
         console.print(f"{SUCCESS} Goal completed:")
         console.print(output)
         if skill_draft:
@@ -773,7 +1043,10 @@ def prompt(
 
 @app.command(name="run")
 def run_cmd(
-    goal: Annotated[str, typer.Argument(help="Goal/instruction to execute")],
+    goal: Annotated[
+        str | None,
+        typer.Argument(help="Goal/instruction to execute, or `-` to read stdin"),
+    ] = None,
     hive: Annotated[str | None, typer.Option("--hive", "-h", help="Specific hive name to run")] = None,
     provider: Annotated[str | None, typer.Option("--provider", help="Provider alias (for auto-mode)")] = None,
     model: Annotated[str | None, typer.Option("--model", help="Model name (for auto-mode)")] = None,
@@ -782,27 +1055,45 @@ def run_cmd(
     quiet: Annotated[bool, typer.Option("--quiet", "-q", help="Quiet output")] = False,
     timeout: Annotated[int | None, typer.Option("--timeout", help="Execution timeout in seconds")] = None,
     artifacts_dir: Annotated[str | None, typer.Option("--artifacts-dir", help="Directory for hive outputs")] = None,
+    approval_mode: Annotated[str | None, typer.Option("--approval-mode", help="interactive|auto|strict|pause")] = None,
+    auto_approve: Annotated[bool, typer.Option("--auto-approve", help="Convenience alias for --approval-mode auto")] = False,
+    goal_file: Annotated[
+        str | None,
+        typer.Option("--goal-file", help="Read the goal from a file (or - for stdin)"),
+    ] = None,
 ) -> None:
-    """Execute a goal non-interactively (headless / CI/CD mode)."""
+    """Execute a goal non-interactively (headless / CI/CD mode).
+
+    A long prompt is better carried by a file or a pipe than by shell quoting, so
+    `--goal-file goal.txt`, `hobees run - < goal.txt`, and `hobees run "short goal"`
+    all work; the goal argument wins over the file, the file over piped stdin.
+    """
+    from hobees.cli.goal_input import require_goal, resolve_goal
+
+    goal_text = require_goal(resolve_goal(goal, goal_file))
+    level = _approval_session_level(approval_mode, auto_approve)
     if hive:
         from hobees.cli.hive_cmd import cmd_hive_run
 
         cmd_hive_run(
             hive_name=hive,
-            goal=goal,
+            goal=goal_text,
             output_json=output_json,
             quiet=quiet,
             timeout=timeout,
             artifacts_dir=artifacts_dir,
             thinking=thinking,
+            approval_mode=level,
         )
     else:
-        prompt(goal=goal, provider=provider, model=model, thinking=thinking)
+        prompt(goal=goal_text, provider=provider, model=model, thinking=thinking, approval_mode=level)
 
 
 @app.command(name="shell")
 def shell_cmd(
     hive: Annotated[str | None, typer.Option("--hive", "-h", help="Hive to activate for this session")] = None,
+    approval_mode: Annotated[str | None, typer.Option("--approval-mode", help="Approval level for this session: interactive|auto|strict|pause")] = None,
+    auto_approve: Annotated[bool, typer.Option("--auto-approve", help="Convenience alias for --approval-mode auto")] = False,
 ) -> None:
     """Enter the interactive subshell (default when run with no arguments)."""
     from hobees.cli.shell import _shell_loop
@@ -816,7 +1107,14 @@ def shell_cmd(
     if len(providers) == 1:
         selected_provider = providers[0]
     
-    _shell_loop({"active_hive": hive} if hive else {}, selected_provider)
+    ctx_obj: dict[str, Any] = {}
+    if hive:
+        ctx_obj["active_hive"] = hive
+    session_level = _approval_session_level(approval_mode, auto_approve)
+    if session_level:
+        ctx_obj["approval_mode"] = session_level
+
+    _shell_loop(ctx_obj, selected_provider)
 
 
 # Alias `-p <goal>` support: typer doesn't natively do short-option aliases on

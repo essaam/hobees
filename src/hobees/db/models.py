@@ -92,6 +92,7 @@ class Bee(Base):
     # v1.1: thinking level
     thinking_level: Mapped[str] = mapped_column(String(16), default="off")  # off|low|medium|high
     tool_names: Mapped[list[str]] = mapped_column(JSON, default=list)
+    require_approval: Mapped[list[str]] = mapped_column(JSON, default=list)
     created_at: Mapped[TimestampTZ]
 
     provider: Mapped["LLMProvider"] = relationship(
@@ -166,7 +167,8 @@ class Run(Base):
     __tablename__ = "runs"
 
     id: Mapped[IntPK]
-    thread_id: Mapped[str] = mapped_column(String(64), unique=True, nullable=False)
+    thread_id: Mapped[str] = mapped_column(String(512), unique=True, nullable=False)
+    container_name: Mapped[str | None] = mapped_column(String(128), default=None)
     hive_id: Mapped[int | None] = mapped_column(
         Integer, ForeignKey("hives.id", ondelete="SET NULL"), default=None
     )
@@ -197,7 +199,9 @@ class UsageEvent(Base):
     run_id: Mapped[int | None] = mapped_column(
         Integer, ForeignKey("runs.id", ondelete="CASCADE"), default=None
     )
-    thread_id: Mapped[str] = mapped_column(String(64), nullable=False)
+    thread_id: Mapped[str] = mapped_column(String(512), nullable=False)
+    container_name: Mapped[str | None] = mapped_column(String(128), default=None)
+    checkpoint_id: Mapped[str | None] = mapped_column(String(128), default=None)
     bee_name: Mapped[str] = mapped_column(String(64), nullable=False)
     provider_alias: Mapped[str] = mapped_column(String(64), nullable=False)
     model_name: Mapped[str] = mapped_column(String(128), nullable=False)
@@ -214,6 +218,32 @@ class UsageEvent(Base):
         return f"<UsageEvent bee={self.bee_name!r} cost=${self.estimated_cost_usd}>"
 
 
+class ApprovalEvent(Base):
+    __tablename__ = "approval_events"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    container_name: Mapped[str] = mapped_column(String(128), nullable=False)
+    thread_id: Mapped[str] = mapped_column(String(512), nullable=False)
+    checkpoint_id: Mapped[str | None] = mapped_column(String(128), default=None)
+    hive_name: Mapped[str | None] = mapped_column(String(64), default=None)
+    bee_name: Mapped[str] = mapped_column(String(64), nullable=False)
+    tool_name: Mapped[str] = mapped_column(String(128), nullable=False)
+    tool_call_id: Mapped[str] = mapped_column(String(128), nullable=False)
+    approval_mode: Mapped[str] = mapped_column(String(16), nullable=False)
+    decision: Mapped[str] = mapped_column(String(16), nullable=False)
+    original_args_json: Mapped[str | None] = mapped_column(Text, default=None)
+    final_args_json: Mapped[str | None] = mapped_column(Text, default=None)
+    reason: Mapped[str | None] = mapped_column(Text, default=None)
+    requested_at: Mapped[TimestampTZ]
+    resolved_at: Mapped[OptionalTimestampTZ]
+
+    __table_args__ = (
+        Index("ix_approval_events_container_name", "container_name"),
+        Index("ix_approval_events_thread_id", "thread_id"),
+        Index("ix_approval_events_checkpoint_id", "checkpoint_id"),
+    )
+
+
 # v1.1: Cross-session scoped memory store
 class Memory(Base):
     __tablename__ = "memories"
@@ -222,7 +252,7 @@ class Memory(Base):
     namespace: Mapped[str] = mapped_column(String(128), nullable=False)  # 'global' | 'hive:<name>' | 'bee:<name>'
     key: Mapped[str] = mapped_column(String(128), nullable=False)
     content: Mapped[str] = mapped_column(Text, nullable=False)
-    source_thread_id: Mapped[str | None] = mapped_column(String(64), default=None)
+    source_thread_id: Mapped[str | None] = mapped_column(String(512), default=None)
     updated_at: Mapped[TimestampTZ]
 
     __table_args__ = (
@@ -243,7 +273,7 @@ class Skill(Base):
     description: Mapped[str] = mapped_column(Text, nullable=False)
     instructions: Mapped[str] = mapped_column(Text, nullable=False)
     tags: Mapped[list[str]] = mapped_column(JSON, default=list)
-    source_thread_id: Mapped[str | None] = mapped_column(String(64), default=None)
+    source_thread_id: Mapped[str | None] = mapped_column(String(512), default=None)
     usage_count: Mapped[int] = mapped_column(Integer, default=0)
     created_at: Mapped[TimestampTZ]
     updated_at: Mapped[TimestampTZ]

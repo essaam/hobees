@@ -81,17 +81,81 @@ The production Docker image is built with `uv sync --no-dev`, so it does not
 include pytest. Run tests from the development checkout with `uv run pytest`.
 This repository does not define a development Docker image.
 
+The Studio **Containers** tab prepares that deployment from the running settings: it generates the
+deployable set (`compose.yaml`, `Dockerfile`, `hobees.yaml`, `goal.txt`, `docker-entrypoint.sh`),
+can save the files to the project root (`HOBEES_PROJECT_ROOT`, fixed names) or download them one
+by one, and it does nothing else - nothing in hobees runs `docker` from the browser.
+Environment values stay as `${NAME}` references, so generated files never contain a key, and the
+write is blocked in `--read-only` mode.
+
 Keep `./artifacts` and `./skills` mounted when testing features that write files. On Linux, set `HOBEES_UID` and `HOBEES_GID` in `.env` to match the host user (`id -u`, `id -g`) so bind mounts remain writable.
 
 ## Change Guidelines
 
 - Follow existing Python, Typer, Pydantic, SQLAlchemy, and LangGraph patterns.
+- Path segments derived from a namespaced thread key (trace JSONL names, the
+  scratchpad directory for offloaded tool output) go through
+  `hobees.core.paths.safe_path_component()` so they remain legal on Windows and
+  the path a Bee is shown is the path it can read back. Tool path resolution
+  reports `ERROR:` instead of raising for a path that cannot exist on the host.
 - Use focused edits and preserve public CLI behavior.
 - Put orchestration logic in `src/hobees/core/`, persistence in `src/hobees/db/`, and CLI/API presentation in their respective packages.
 - Add or update pytest coverage for new behavior and bug fixes.
 - Update README sections and examples when user-visible behavior changes.
-- Do not log or persist provider credentials.
-- Do not alter or delete existing user data, database volumes, or unrelated generated files.
+- A `require_approval` gate can only fire for a tool the Bee declares in `tools`
+  *and* that exists in `TOOL_REGISTRY`; `hobees import`, `hobees bee create`/`update`
+  and the shared Bee handlers warn when it does not, because such a gate can never
+  be reached. `hobees approvals`/`/approvals` and the Web UI show pending gates;
+  `strict` resolves them by rejection without prompting, by design.
+- Container preparation (Studio Containers tab) generates `compose.yaml` and `Dockerfile`
+  from the live settings/providers. Generated files reference environment variables **by
+  name** (`${NAME}`), never literal secret values, and no `docker` command is executed by the
+  web layer: the tab writes files and the pipeline (or a person) runs them. The **exit code** is
+  the pipeline's signal - 0 completed, 1 failed, 2 stopped for an approval a headless run cannot
+  answer, 3 still running - so `docker-entrypoint.sh` must keep `set -eu` and the final `exec`,
+  and `hobees.core.pipeline_status.STATUS_EXIT_CODES`, the manifest `exit_code`,
+  `hobees pipeline status`, the entrypoint comment and `tests/test_pipeline_status.py` must agree.
+  A run that ends awaiting approval must not exit 0. The Containers tab generates the deployable set
+  from the active configuration (`compose.yaml`, `Dockerfile`, `hobees.yaml`, `goal.txt`,
+  `docker-entrypoint.sh`): the entrypoint runs `hobees init --config` first, then the goal. The
+  goal text is only ever written to its own file or read from stdin - it is never interpolated
+  into the script - and `save_project_files()` takes plain validated file names inside the
+  project root. `GOAL_MODES` (`mount` default, `bake`, `stdin`) must stay in sync with the
+  generated command, the volume mount, and `tests/test_container_prep.py` / `tests/test_web.py`.  The `Dockerfile` generator must stay in step with the repo `Dockerfile` (PyPI install via
+  `uv tool install hobees`, no source tree in the image) and `DEFAULT_WORKING_DIR` must stay equal to
+  its `WORKDIR`. Generated paths are relative to the project root and run-time names are used
+  (`CONTAINER_NAME_PLACEHOLDER`) so a machine-specific path or host name can never be written into a
+  committed file; the web service is optional and commented out unless `include_web` is set.
+  A path or value is defined once: the `Dockerfile` `ENV` provides `HOBEES_CONFIG_PATH` and
+  `HOBEES_GOAL_FILE` and `docker-entrypoint.sh` reads them from the environment, so compose must not
+  redefine them; the Postgres service key and the database host come from `postgres_service_name`; and
+  every host path is written relative to the compose file (`./`). `.env.sample` lists key **names**
+  only, never values, and must stay consistent with the names compose interpolates.
+  In the Web UI, the model visibly selected must be the value the form stores: one order in the form
+  ("pickModel") and the API ("resolve_model_name") - requested, provider default,
+  assistant model, first detected, otherwise nothing. If the form holds an empty value while the picker
+  shows one, saving reports "no model" and Test model stays disabled - that was the bug.
+  saving a Bee or Hive says "add a model" and Test model stays disabled while one looks chosen. The API uses the same order ("resolve_model_name"): asked-for,
+  default, assistant, first detected, and a provider with none of those is refused.
+  The generator writes no `CMD` and no default compose `command`: `docker-entrypoint.sh` is the only
+  place that decides what runs, and `spec.command` is an explicit override. The Containers tab is
+  file-generation only - it must not offer to start or stop a container - and a field change reaches
+  the files only through Update spec.
+- An import writes by name, so `hobees import` and the Studio templates panel share
+  `cli/import_cmd.CONFLICT_MODES` (`skip` | `overwrite`): `analyze_config_conflicts()` is
+  the single source for what already exists, `overwrite` stays the CLI default, the web
+  panel defaults to `skip`, and a colliding template is applied only after the user
+  confirms. A skipped hive or skill keeps its roster and assignments too, since those are
+  part of the entry.
+- Reset (`hobees reset`, Studio Quick setup tab) deletes only the paths it planned: the config
+  files inside `~/.hobees`, plus the skills/artifacts roots for `--all`. Confirmation is
+  required on both surfaces — the CLI needs a `Y (yes)` answer and the API rejects an
+  unconfirmed request — so `hobees.core.reset.allowed_roots()`, the plan builder and
+  `tests/test_reset.py` must agree. `apply_plan()` releases the engine pool before it
+  deletes, so a reset running inside a process that opened the database can remove
+  `hobees.db` on Windows; a handle held by another process is reported, never forced.
+  `reset` stays out of the slash-command catalog
+  because the interactive shell and the TUI do not offer it.
 
 ## Pull Requests
 

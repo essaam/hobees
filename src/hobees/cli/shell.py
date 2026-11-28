@@ -11,6 +11,8 @@ The shell provides slash commands for:
 * ``/hive auto`` — Switch back to Queen auto-mode
 * ``/usage`` — Query usage telemetry
 * ``/thinking`` — Set session-wide thinking level override
+* ``/approvals`` (``/permissions``) — Set the tool approval level for the current
+  session, or globally (persisted to ``~/.hobees/.env``)
 * ``/compact`` — Compress active thread's message history
 * ``/memory`` — Cross-session scoped memory store
 * ``/skill`` — Progressive skill library
@@ -52,6 +54,7 @@ from hobees.core.streaming import DeltaStreamer
 from hobees.core.queen import Queen, build_queen
 from hobees.core.model_discovery import fetch_provider_models
 from hobees.db.models import Bee, Hive, HiveMembership, LLMProvider, Run
+from sqlalchemy.engine import URL
 from sqlalchemy.orm import joinedload
 from hobees.db.session import session_scope, get_engine
 
@@ -114,7 +117,11 @@ def _delete_session(name: str) -> bool:
     return False
 
 
-def _capture_session_state(active_hive: str | None = None, thread_id: str | None = None) -> dict:
+def _capture_session_state(
+    active_hive: str | None = None,
+    thread_id: str | None = None,
+    approval_mode: str | None = None,
+) -> dict:
     """Capture current shell state for session saving."""
     with session_scope() as session:
         providers = session.query(LLMProvider).all()
@@ -124,6 +131,7 @@ def _capture_session_state(active_hive: str | None = None, thread_id: str | None
     return {
         "active_hive": active_hive,
         "thread_id": thread_id,
+        "approval_mode": approval_mode,
         "timestamp": str(uuid.uuid4()),
         "providers": [{"alias": p.alias, "type": p.provider_type} for p in providers],
         "bees": [{"name": b.name, "provider": b.provider_id} for b in bees],
@@ -131,7 +139,7 @@ def _capture_session_state(active_hive: str | None = None, thread_id: str | None
     }
 
 
-def _get_checkpointer(db_url):
+def _get_checkpointer(db_url: str | URL):
     """Get the appropriate checkpointer for the database type."""
     import sqlite3
 
@@ -169,7 +177,7 @@ def _get_checkpointer(db_url):
     return saver, connection
 
 
-async def _get_async_checkpointer(db_url):
+async def _get_async_checkpointer(db_url: str | URL):
     """Open an async-compatible checkpointer and return its resource stack."""
     from contextlib import AsyncExitStack
 
@@ -863,7 +871,16 @@ def _handle_goal(args: list[str], provider: LLMProvider, db_url: str, shell_stat
         thinking_override = shell_state.get("thinking_override", "medium")
         queen = build_queen(provider, provider.default_model, db_url, thread_id, thinking_override)
 
-        with hive_app(hive, chosen, providers, db_url, thread_id, run_id, thinking_override) as app:
+        with hive_app(
+            hive,
+            chosen,
+            providers,
+            db_url,
+            thread_id,
+            run_id,
+            thinking_override,
+            approval_mode=shell_state.get("approval_mode"),
+        ) as app:
             result = app.invoke(
                 {"messages": [("user", goal)]},
                 config={"configurable": {"thread_id": thread_id}},
@@ -932,6 +949,27 @@ def _handle_thinking(args: list[str], shell_state: dict) -> None:
         return
     shell_state["thinking_override"] = args[0]
     console.print(f"{SUCCESS} Session thinking level set to '{args[0]}'")
+
+
+def _approval_status(shell_state: dict) -> tuple[str, str]:
+    """Return ``(level, source)`` for the shell's current session override."""
+    from hobees.cli.approval_cmd import effective_level
+
+    return effective_level(
+        shell_state.get("approval_mode"), interactive=sys.stdin.isatty()
+    )
+
+
+def _handle_approvals(args: list[str], shell_state: dict) -> None:
+    from rich.markup import escape
+
+    from hobees.cli.approval_cmd import ICON_OF, handle
+
+    kind, message, new_level = handle(
+        args, shell_state.get("approval_mode"), interactive=sys.stdin.isatty()
+    )
+    shell_state["approval_mode"] = new_level
+    console.print(f"{ICON_OF[kind]} {escape(message)}")
 
 
 def _handle_compact(provider: LLMProvider, db_url: str, shell_state: dict) -> None:
@@ -1092,7 +1130,11 @@ def _handle_session(args: list[str], shell_state: dict) -> None:
             console.print("Usage: /session save <name>")
             return
         name = rest[0]
-        state = _capture_session_state(shell_state.get("active_hive"), shell_state.get("thread_id"))
+        state = _capture_session_state(
+            shell_state.get("active_hive"),
+            shell_state.get("thread_id"),
+            shell_state.get("approval_mode"),
+        )
         _save_session(name, state)
         console.print(f"{SUCCESS} Session '{name}' saved.")
 
@@ -1107,6 +1149,7 @@ def _handle_session(args: list[str], shell_state: dict) -> None:
             return
         shell_state["active_hive"] = data.get("active_hive")
         shell_state["thread_id"] = data.get("thread_id")
+        shell_state["approval_mode"] = data.get("approval_mode")
         console.print(f"{SUCCESS} Session '{name}' loaded. Active hive: {shell_state['active_hive'] or 'Queen auto-mode'}")
 
     elif cmd == "list":
@@ -1173,16 +1216,20 @@ def _handle_chat(args: list[str], provider: LLMProvider | None, db_url: str, she
         if not rest:
             console.print("Usage: /chat bee <name>")
             return
-        import asyncio
-        asyncio.run(_chat_with_bee(rest[0], provider, db_url, shell_state))
+        _run_async_in_shell_loop(
+            _chat_with_bee(rest[0], provider, db_url, shell_state),
+            shell_state,
+        )
         return
 
     if cmd == "hive":
         if not rest:
             console.print("Usage: /chat hive <name>")
             return
-        import asyncio
-        asyncio.run(_chat_with_hive(rest[0], provider, db_url, shell_state))
+        _run_async_in_shell_loop(
+            _chat_with_hive(rest[0], provider, db_url, shell_state),
+            shell_state,
+        )
         return
 
     console.print("[bold]Chat usage:[/bold] /chat bee <name>, /chat hive <name>, /chat list")
@@ -1205,6 +1252,7 @@ def _panel_tail(text: str, lines: int = 8, width: int = 400) -> str:
 
 async def _chat_with_bee(bee_name: str, provider: LLMProvider, db_url: str, shell_state: dict) -> None:
     """Chat directly with a single Bee - streaming with thoughts panel."""
+    from hobees.core.approval import ApprovalMiddleware, resolve_approval_mode
     from hobees.core.llm_factory import get_chat_model
     from hobees.core.tool_registry import get_tools
     from hobees.db.session import session_scope
@@ -1257,6 +1305,10 @@ async def _chat_with_bee(bee_name: str, provider: LLMProvider, db_url: str, shel
         thinking_level=thinking_level,
     )
     tools = get_tools(bee.tool_names)
+    approval_mode = resolve_approval_mode(
+        session_mode=shell_state.get("approval_mode"),
+        interactive=sys.stdin.isatty(),
+    )
 
     from hobees.core.memory_manager import extract_namespaces, build_memory_block
     from hobees.core.tool_registry import get_skill_metadata
@@ -1291,6 +1343,16 @@ async def _chat_with_bee(bee_name: str, provider: LLMProvider, db_url: str, shel
             system_prompt=full_system_prompt,
             name=bee.name,
             checkpointer=saver,
+            middleware=[
+                ApprovalMiddleware(
+                    bee_name=bee.name,
+                    hive_name=None,
+                    thread_id=thread_id,
+                    container_name="local",
+                    approval_mode=approval_mode,
+                    require_approval=bee.require_approval,
+                )
+            ],
         )
     except BaseException:
         await checkpoint_stack.aclose()
@@ -1443,7 +1505,14 @@ async def _chat_with_hive(
     console.print(f"[bold]Chatting with {HIVE} {hive.name}[/bold] (type 'exit' to return)")
 
     async with hive_app_async(
-        hive, bees, providers, db_url, thread_id, run_id, thinking_override
+        hive,
+        bees,
+        providers,
+        db_url,
+        thread_id,
+        run_id,
+        thinking_override,
+        approval_mode=shell_state.get("approval_mode"),
     ) as app:
         actions_buffer: list[str] = []
 
@@ -1721,6 +1790,7 @@ def _shell_loop(ctx_obj: dict | None = None, selected_provider: LLMProvider | No
         "active_hive": None,
         "thread_id": None,
         "thinking_override": "auto",  # auto | off | low | medium | high
+        "approval_mode": (ctx_obj or {}).get("approval_mode"),
         "provider": selected_provider,
         "cancel_task": False,
     }
@@ -1733,6 +1803,9 @@ def _shell_loop(ctx_obj: dict | None = None, selected_provider: LLMProvider | No
             if data:
                 shell_state["active_hive"] = data.get("active_hive")
                 shell_state["thread_id"] = data.get("thread_id")
+                # A CLI flag beats the saved session (specs/HITL.md §2.3).
+                if not shell_state.get("approval_mode"):
+                    shell_state["approval_mode"] = data.get("approval_mode")
                 console.print(f"{SUCCESS} Resumed session: {name}")
             else:
                 console.print(f"{WARN} Session '{name}' not found, starting fresh.")
@@ -1814,10 +1887,12 @@ def _shell_loop(ctx_obj: dict | None = None, selected_provider: LLMProvider | No
             shell_state["default_model"] = session_model
 
         project_root = shell_state.get("project_root", "unknown")
+        approval_level, approval_source = _approval_status(shell_state)
         console.print(Panel.fit(
             f"[bold]{APP} hobees Interactive Shell[/bold]\n"
             f"Provider: [cyan]{provider.alias}[/cyan] ({provider.provider_type})\n"
             f"Model: [cyan]{session_model or 'none'}[/cyan]\n"
+            f"Approval: [cyan]{approval_level}[/cyan] ({approval_source})\n"
             f"Project root: [cyan]{project_root}[/cyan]\n"
             f"Type [cyan]/help[/cyan] for commands, [cyan]/session save <name>[/cyan] to persist state.",
             border_style="yellow",
@@ -1882,6 +1957,71 @@ def _shell_loop(ctx_obj: dict | None = None, selected_provider: LLMProvider | No
 
         if should_exit:
             break
+    _stop_shell_chat_loop(shell_state)
+
+
+def _ensure_shell_chat_loop(shell_state: dict) -> tuple["asyncio.AbstractEventLoop", "threading.Thread"]:
+    import asyncio
+    import threading
+
+    loop = shell_state.get("_chat_loop")
+    thread = shell_state.get("_chat_loop_thread")
+    if loop is not None and thread is not None and not loop.is_closed() and thread.is_alive():
+        return loop, thread
+
+    loop_ready = threading.Event()
+
+    def run_loop() -> None:
+        chat_loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(chat_loop)
+        shell_state["_chat_loop"] = chat_loop
+        loop_ready.set()
+        try:
+            chat_loop.run_forever()
+        finally:
+            pending = asyncio.all_tasks(chat_loop)
+            for task in pending:
+                task.cancel()
+            if pending:
+                chat_loop.run_until_complete(
+                    asyncio.gather(*pending, return_exceptions=True)
+                )
+            chat_loop.run_until_complete(chat_loop.shutdown_asyncgens())
+            chat_loop.close()
+            asyncio.set_event_loop(None)
+            shell_state["_chat_loop"] = None
+
+    thread = threading.Thread(
+        target=run_loop,
+        name="hobees-shell-chat",
+        daemon=True,
+    )
+    thread.start()
+    loop_ready.wait()
+    loop = shell_state["_chat_loop"]
+    shell_state["_chat_loop_thread"] = thread
+    return loop, thread
+
+
+def _run_async_in_shell_loop(coro, shell_state: dict):
+    import asyncio
+
+    loop, _thread = _ensure_shell_chat_loop(shell_state)
+    future = asyncio.run_coroutine_threadsafe(coro, loop)
+    return future.result()
+
+
+def _stop_shell_chat_loop(shell_state: dict) -> None:
+    import threading
+
+    loop = shell_state.get("_chat_loop")
+    thread = shell_state.get("_chat_loop_thread")
+    if loop is not None and not loop.is_closed():
+        loop.call_soon_threadsafe(loop.stop)
+    if thread is not None and thread.is_alive():
+        thread.join(timeout=2)
+    shell_state["_chat_loop"] = None
+    shell_state["_chat_loop_thread"] = None
 
 
 def _dispatch_command(
@@ -1911,6 +2051,8 @@ def _dispatch_command(
         _handle_usage(args)
     elif cmd == "thinking":
         _handle_thinking(args, shell_state)
+    elif cmd in ("approvals", "permissions"):
+        _handle_approvals(args, shell_state)
     elif cmd == "compact":
         _handle_compact(shell_state.get("provider"), db_url, shell_state)
     elif cmd == "memory":
@@ -1928,34 +2070,28 @@ def _dispatch_command(
         # If input doesn't start with / and we have a provider, treat as chat with assistant
         current_provider = shell_state.get("provider")
         if current_provider and not user_input.startswith("/"):
-            import asyncio
-            import concurrent.futures
-
-            def run_async_in_thread():
-                # Keep chat off this thread's loop so prompt_toolkit can drive
-                # the terminal while the model streams.
-                loop = asyncio.new_event_loop()
-                asyncio.set_event_loop(loop)
-                try:
-                    active_hive = shell_state.get("active_hive")
-                    if active_hive:
-                        return loop.run_until_complete(
-                            _chat_with_hive(
-                                active_hive,
-                                current_provider,
-                                db_url,
-                                shell_state,
-                                initial_input=user_input,
-                            )
-                        )
-                    return loop.run_until_complete(
-                        _chat_with_assistant(user_input, current_provider, db_url, shell_state)
-                    )
-                finally:
-                    loop.close()
-
-            with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
-                executor.submit(run_async_in_thread).result()
+            active_hive = shell_state.get("active_hive")
+            if active_hive:
+                _run_async_in_shell_loop(
+                    _chat_with_hive(
+                        active_hive,
+                        current_provider,
+                        db_url,
+                        shell_state,
+                        initial_input=user_input,
+                    ),
+                    shell_state,
+                )
+            else:
+                _run_async_in_shell_loop(
+                    _chat_with_assistant(
+                        user_input,
+                        current_provider,
+                        db_url,
+                        shell_state,
+                    ),
+                    shell_state,
+                )
         else:
             console.print(f"[bold]Unknown command: {cmd}[/bold]")
             console.print("  Type /help to see available commands.")
@@ -1964,6 +2100,7 @@ def _dispatch_command(
 
 async def _chat_with_assistant(user_input: str, provider: LLMProvider, db_url: str, shell_state: dict) -> None:
     """Chat with the default assistant bee - streaming with thoughts panel."""
+    from hobees.core.approval import ApprovalMiddleware, resolve_approval_mode
     from hobees.core.llm_factory import get_chat_model
     from hobees.core.tool_registry import get_tools
     from hobees.db.session import session_scope
@@ -2020,6 +2157,10 @@ async def _chat_with_assistant(user_input: str, provider: LLMProvider, db_url: s
         thinking_level=thinking_level,
     )
     tools = get_tools(assistant.tool_names)
+    approval_mode = resolve_approval_mode(
+        session_mode=shell_state.get("approval_mode"),
+        interactive=sys.stdin.isatty(),
+    )
 
     memory_namespaces = extract_namespaces(global_=True, bee_name=assistant.name)
     memory_block = build_memory_block(memory_namespaces)
@@ -2090,6 +2231,16 @@ You are the hobees assistant. You know the hobees system inside out:
             system_prompt=full_system_prompt,
             name=assistant.name,
             checkpointer=saver,
+            middleware=[
+                ApprovalMiddleware(
+                    bee_name=assistant.name,
+                    hive_name=None,
+                    thread_id=thread_id,
+                    container_name="local",
+                    approval_mode=approval_mode,
+                    require_approval=assistant.require_approval,
+                )
+            ],
         )
     except BaseException:
         await checkpoint_stack.aclose()

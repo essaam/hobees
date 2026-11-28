@@ -43,6 +43,24 @@ def test_truncate_tool_output_uses_hive_scratchpad_root(tmp_path):
     ).read_text(encoding="utf-8") == long_text
 
 
+def test_scratchpad_directory_is_windows_safe_for_namespaced_threads(tmp_path):
+    long_text = "A" * (MAX_TOOL_OUTPUT_CHARS + 500)
+    thread_key = "worker-1:hive:dev-team:91318583"
+
+    out = truncate_tool_output(
+        long_text,
+        call_id="c4",
+        thread_id=thread_key,
+        scratchpad_root=tmp_path / "scratchpad",
+    )
+
+    safe_dir = "worker-1__hive__dev-team__91318583"
+    shown = out.split("Full output saved to: ", 1)[1].split("\n", 1)[0]
+    assert ":" not in shown
+    assert shown == f"scratchpad/{safe_dir}/c4.txt"
+    assert (tmp_path / "scratchpad" / safe_dir / "c4.txt").read_text(encoding="utf-8") == long_text
+
+
 def test_project_worker_context():
     ctx = project_worker_context(
         bee_name="coder",

@@ -1,4 +1,5 @@
 import asyncio
+import inspect
 import sys
 from types import SimpleNamespace
 from unittest.mock import Mock
@@ -249,6 +250,45 @@ def test_shell_routes_unprefixed_input_to_active_hive(monkeypatch):
     )
 
 
+def test_shell_routes_repeated_unprefixed_input_with_persistent_loop(monkeypatch):
+    received = []
+
+    async def fake_chat(provider, db_url, state, initial_input=None):
+        import asyncio
+
+        queue = asyncio.Queue()
+        queue.put_nowait(initial_input)
+        received.append((await queue.get(), asyncio.get_running_loop()))
+
+    monkeypatch.setattr(
+        shell,
+        "_chat_with_assistant",
+        lambda user_input, provider, db_url, state: fake_chat(
+            provider, db_url, state, initial_input=user_input
+        ),
+    )
+    state = {"provider": object()}
+
+    shell._dispatch_command(
+        "first",
+        [],
+        "first",
+        "sqlite:///:memory:",
+        state,
+    )
+    shell._dispatch_command(
+        "second",
+        [],
+        "second",
+        "sqlite:///:memory:",
+        state,
+    )
+
+    assert [item[0] for item in received] == ["first", "second"]
+    assert received[0][1] is received[1][1]
+    shell._stop_shell_chat_loop(state)
+
+
 def test_shell_dispatches_detect_providers_slash_command(monkeypatch):
     detection = Mock()
     monkeypatch.setattr(main, "_run_provider_detection", detection)
@@ -275,3 +315,9 @@ def test_stdin_escape_listener_uses_msvcrt_on_windows(monkeypatch):
     asyncio.run(shell._stdin_escape_listener(cancel_flag))
 
     assert cancel_flag["cancelled"] is True
+
+def test_web_ui_default_port_is_6543():
+    """`hobees web` with no --port binds 6543; Typer defaults are OptionInfo objects."""
+    defaults = dict(zip(inspect.signature(main.web).parameters, main.web.__defaults__))
+    assert defaults["port"].default == 6543
+    assert defaults["host"].default == "127.0.0.1"

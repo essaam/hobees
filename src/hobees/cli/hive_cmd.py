@@ -343,9 +343,17 @@ def cmd_hive_run(
     timeout: int | None = None,
     artifacts_dir: str | None = None,
     thinking: str | None = None,
+    approval_mode: str | None = None,
+    container_name: str | None = None,
+    resume_decision: str | None = None,
+    resume_args: str | None = None,
+    resume_reason: str | None = None,
+    replay: str | None = None,
+    patch_message: str | None = None,
 ) -> None:
     """Execute a goal non-interactively using a specific Hive (headless / CI/CD mode)."""
     import json
+    import sys
     import uuid
     import asyncio
     from datetime import datetime, timezone
@@ -357,6 +365,24 @@ def cmd_hive_run(
     from hobees.core.tracing import write_run_manifest
     from hobees.db.analytics import run_thread_usage
     from hobees.config import settings
+    from hobees.core.approval import (
+        resolve_approval_mode,
+        resolve_container_name,
+        resolve_thread_id,
+    )
+
+    container_name = resolve_container_name(container_name)
+    approval_mode = resolve_approval_mode(
+        approval_mode,
+        interactive=sys.stdin.isatty(),
+    )
+    if approval_mode not in {"interactive", "auto", "strict", "pause"}:
+        console.print(f"{ERROR} Invalid approval mode: {approval_mode}")
+        raise typer.Exit(code=1)
+    if resume_decision and resume_decision not in {"approve", "edit", "reject"}:
+        console.print(f"{ERROR} Invalid resume decision: {resume_decision}")
+        raise typer.Exit(code=1)
+
 
     with session_scope() as session:
         hive = session.query(Hive).filter_by(name=hive_name).first()
@@ -374,8 +400,12 @@ def cmd_hive_run(
             p.id: p for p in session.query(LLMProvider).filter(LLMProvider.id.in_(provider_ids)).all()
         }
 
-    if not thread_id:
-        thread_id = uuid.uuid4().hex
+    thread_id = resolve_thread_id(
+        "hive",
+        hive.name,
+        user_thread=thread_id,
+        container_name=container_name,
+    )
 
     # Determine artifacts directory
     if artifacts_dir:
@@ -405,6 +435,7 @@ def cmd_hive_run(
             raise typer.Exit(code=1)
         if run:
             run.hive_id = hive.id
+            run.container_name = container_name
             run.mode = "targeted"
             run.goal = goal
             run.status = "running"
@@ -415,6 +446,7 @@ def cmd_hive_run(
         else:
             run = Run(
                 thread_id=thread_id,
+                container_name=container_name,
                 hive_id=hive.id,
                 mode="targeted",
                 goal=goal,
@@ -450,13 +482,56 @@ def cmd_hive_run(
                 run_id,
                 thinking,
                 artifact_root=art_path,
+                approval_mode=approval_mode,
+                container_name=container_name,
             ) as app:
                 if broker is not None:
                     event_queue = broker.subscribe()
+                from langgraph.types import Command
+
+                if replay:
+                    replay_config = {
+                        "configurable": {
+                            "thread_id": thread_id,
+                            "checkpoint_id": replay,
+                        }
+                    }
+                    replay_found = False
+                    async for state in app.aget_state_history(
+                        {"configurable": {"thread_id": thread_id}}
+                    ):
+                        if getattr(state, "config", {}).get("configurable", {}).get(
+                            "checkpoint_id"
+                        ) == replay:
+                            replay_found = True
+                            break
+                    if not replay_found:
+                        raise RuntimeError(
+                            f"Checkpoint {replay!r} was not found for thread {thread_id}"
+                        )
+                    if patch_message:
+                        await app.aupdate_state(
+                            replay_config,
+                            {"messages": [("user", patch_message)]},
+                        )
+                    invoke_input = None
+                    invoke_config = replay_config
+                elif resume_decision:
+                    resume_payload = {"action": resume_decision}
+                    if resume_decision == "edit" and resume_args:
+                        resume_payload["args"] = json.loads(resume_args)
+                    if resume_decision == "reject":
+                        resume_payload["reason"] = resume_reason or "Rejected by operator."
+                    invoke_input = Command(resume=resume_payload)
+                    invoke_config = {"configurable": {"thread_id": thread_id}}
+                else:
+                    invoke_input = {"messages": [("user", goal)]}
+                    invoke_config = {"configurable": {"thread_id": thread_id}}
+
                 invoke_task = asyncio.create_task(
                     app.ainvoke(
-                        {"messages": [("user", goal)]},
-                        config={"configurable": {"thread_id": thread_id}},
+                        invoke_input,
+                        config=invoke_config,
                     )
                 )
                 try:
@@ -487,6 +562,57 @@ def cmd_hive_run(
         else:
             result = asyncio.run(_run_hive())
 
+        interrupts = result.get("__interrupt__", []) if isinstance(result, dict) else []
+        awaiting_approval = bool(interrupts)
+
+        if awaiting_approval and approval_mode == "interactive":
+            async def _resume_interruptively():
+                from langgraph.types import Command
+
+                async with hive_app_async(
+                    hive, bees, providers, db_url, thread_id, run_id, thinking,
+                    artifact_root=art_path,
+                    approval_mode=approval_mode,
+                    container_name=container_name,
+                ) as app:
+                    current = result
+                    while current.get("__interrupt__", []) if isinstance(current, dict) else []:
+                        interrupt_items = current.get("__interrupt__", [])
+                        if not interrupt_items:
+                            break
+                        item = interrupt_items[0]
+                        payload = getattr(item, "value", None) or item
+                        console.print(
+                            f"\n[bold yellow]Approval required[/bold yellow] "
+                            f"bee={payload.get('bee')} tool={payload.get('tool')}"
+                        )
+                        console.print_json(data=payload.get("args", {}))
+                        choice = console.input("[A]pprove / [E]dit / [R]eject: ").strip().lower()
+                        if choice.startswith("e"):
+                            import json as json_module
+                            edited = console.input("JSON args: ").strip()
+                            decision = {
+                                "action": "edit",
+                                "args": json_module.loads(edited),
+                            }
+                        elif choice.startswith("r"):
+                            decision = {
+                                "action": "reject",
+                                "reason": console.input("Reason (optional): ").strip()
+                                or "Rejected by operator.",
+                            }
+                        else:
+                            decision = {"action": "approve"}
+                        current = await app.ainvoke(
+                            Command(resume=decision),
+                            config={"configurable": {"thread_id": thread_id}},
+                        )
+                    return current
+
+            result = asyncio.run(_resume_interruptively())
+            interrupts = result.get("__interrupt__", []) if isinstance(result, dict) else []
+            awaiting_approval = bool(interrupts)
+
         msgs = result.get("messages", []) if isinstance(result, dict) else []
         if msgs:
             last = msgs[-1]
@@ -500,22 +626,27 @@ def cmd_hive_run(
         with session_scope() as session:
             run_obj = session.get(Run, run_id)
             if run_obj:
-                run_obj.status = "completed"
+                run_obj.status = (
+                    "awaiting_approval"
+                    if awaiting_approval
+                    else "completed"
+                )
                 run_obj.completed_at = completed_at
-        from hobees.core.memory_manager import extract_run_memories
+        if not awaiting_approval:
+            from hobees.core.memory_manager import extract_run_memories
 
-        extract_run_memories(
-            goal=goal,
-            output=output_text,
-            provider=providers[hive.supervisor_provider_id],
-            model_name=hive.supervisor_model_name,
-            hive_name=hive.name,
-            source_thread_id=thread_id,
-            allow_hive_facts=not hive.is_dynamic,
-        )
-        from hobees.core.skill_harvester import harvest_completed_run
+            extract_run_memories(
+                goal=goal,
+                output=output_text,
+                provider=providers[hive.supervisor_provider_id],
+                model_name=hive.supervisor_model_name,
+                hive_name=hive.name,
+                source_thread_id=thread_id,
+                allow_hive_facts=not hive.is_dynamic,
+            )
+            from hobees.core.skill_harvester import harvest_completed_run
 
-        skill_draft = harvest_completed_run(run_id)
+            skill_draft = harvest_completed_run(run_id)
 
     except Exception as exc:
         completed_at = datetime.now(timezone.utc)
@@ -534,15 +665,21 @@ def cmd_hive_run(
         if broker is not None and event_queue is not None:
             broker.unsubscribe(event_queue)
 
+    from hobees.core.pipeline_status import pipeline_exit_code
+
+    final_status = "failed" if error_msg else ("awaiting_approval" if awaiting_approval else "completed")
     # Build and write manifest
     usage = run_thread_usage(thread_id) or {}
     manifest_data = {
         "run_id": run_id,
+        "container": container_name,
         "thread_id": thread_id,
+        "thread": thread_id,
         "hive_name": hive.name,
         "goal": goal,
-        "status": "failed" if error_msg else "completed",
+        "status": final_status,
         "error": error_msg,
+        "exit_code": pipeline_exit_code(final_status),
         "started_at": start_time.isoformat(),
         "completed_at": completed_at.isoformat(),
         "duration_seconds": duration_sec,
@@ -551,6 +688,19 @@ def cmd_hive_run(
         "usage": usage,
         "suggested_skill_draft": skill_draft,
     }
+    if awaiting_approval:
+        manifest_data["pending_approvals"] = []
+        for item in interrupts:
+            payload = getattr(item, "value", None) or (
+                item.get("value") if isinstance(item, dict) else item
+            )
+            if isinstance(payload, dict):
+                manifest_data["pending_approvals"].append({
+                    "bee": payload.get("bee"),
+                    "tool": payload.get("tool"),
+                    "tool_call_id": payload.get("tool_call_id"),
+                    "args": payload.get("args", {}),
+                })
     write_run_manifest(art_path, manifest_data)
 
     if output_json:
@@ -580,8 +730,12 @@ def cmd_hive_run(
     else:
         console.print(output_text, markup=False)
 
-    if error_msg:
-        raise typer.Exit(code=1)
+    # The pipeline reads this code: 0 completed, 1 failed, 2 stopped for an approval a
+    # headless run cannot answer. A run that stops for approval is not a success, so it
+    # must not exit 0.
+    code = pipeline_exit_code(final_status)
+    if code:
+        raise typer.Exit(code=code)
 
 
 # ---------------------------------------------------------------------------
@@ -677,24 +831,52 @@ def cli_thinking(
 @app.command(name="run")
 def cli_run(
     hive_name: Annotated[str, typer.Argument(help="Hive name to activate")],
-    goal: Annotated[str, typer.Argument(help="Task/goal instruction for the Hive to accomplish")],
+    goal: Annotated[
+        str | None,
+        typer.Argument(help="Task/goal instruction, `-` to read stdin, or omit with --goal-file"),
+    ] = None,
     thread_id: Annotated[str | None, typer.Option("--thread", "-t", help="Thread ID to attach/resume")] = None,
     output_json: Annotated[bool, typer.Option("--json", help="Output run results as structured JSON to stdout")] = False,
     quiet: Annotated[bool, typer.Option("--quiet", "-q", help="Minimal output, suppress banners")] = False,
     timeout: Annotated[int | None, typer.Option("--timeout", help="Maximum execution timeout in seconds")] = None,
     artifacts_dir: Annotated[str | None, typer.Option("--artifacts-dir", help="Directory where hive outputs land")] = None,
     thinking: Annotated[str | None, typer.Option("--thinking", help="Session thinking level override: off|low|medium|high")] = None,
+    approval_mode: Annotated[str | None, typer.Option("--approval-mode", help="interactive|auto|strict|pause")] = None,
+    auto_approve: Annotated[bool, typer.Option("--auto-approve", help="Convenience alias for --approval-mode auto")] = False,
+    container_name: Annotated[str | None, typer.Option("--container", help="Container/instance name")] = None,
+    resume_decision: Annotated[str | None, typer.Option("--resume-decision", help="approve|edit|reject")] = None,
+    resume_args: Annotated[str | None, typer.Option("--resume-args", help="JSON arguments for edit decisions")] = None,
+    resume_reason: Annotated[str | None, typer.Option("--resume-reason", help="Reason for reject decisions")] = None,
+    replay: Annotated[str | None, typer.Option("--replay", help="Replay from a LangGraph checkpoint ID")] = None,
+    patch_message: Annotated[str | None, typer.Option("--patch-message", help="Patch replay state with a human message")] = None,
+    goal_file: Annotated[
+        str | None,
+        typer.Option("--goal-file", help="Read the goal from a file (or - for stdin)"),
+    ] = None,
 ) -> None:
-    """Execute a goal non-interactively using a Hive (headless / CI/CD mode)."""
+    """Execute a goal non-interactively using a Hive (headless / CI/CD mode).
+
+    The goal can be a long prompt, so it may also come from a file or stdin:
+    `hobees hive run dev-team --goal-file goal.txt`, `hobees hive run dev-team - < goal.txt`.
+    """
+    from hobees.cli.goal_input import require_goal, resolve_goal
+
     cmd_hive_run(
         hive_name=hive_name,
-        goal=goal,
+        goal=require_goal(resolve_goal(goal, goal_file)),
         thread_id=thread_id,
         output_json=output_json,
         quiet=quiet,
         timeout=timeout,
         artifacts_dir=artifacts_dir,
         thinking=thinking,
+        approval_mode="auto" if auto_approve else approval_mode,
+        container_name=container_name,
+        resume_decision=resume_decision,
+        resume_args=resume_args,
+        resume_reason=resume_reason,
+        replay=replay,
+        patch_message=patch_message,
     )
 
 

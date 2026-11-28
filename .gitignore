@@ -6,6 +6,7 @@ __pycache__/
 *.egg-info/
 build/
 dist/
+specs/
 
 # Local runtime databases
 *.db
@@ -14,4 +15,8 @@ dist/
 # Local runtime outputs and synced skill files
 artifacts/
 skills/
+
+# Frontend build dependencies
+web-ui/node_modules/
+
 

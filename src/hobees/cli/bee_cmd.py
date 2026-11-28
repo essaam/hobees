@@ -15,6 +15,7 @@ from rich.table import Table
 
 from hobees.cli.icons import BEE, ERROR, SUCCESS, WARN
 from hobees.cli.provider_cmd import interactive_model_picker
+from hobees.core.tool_registry import unknown_tool_names
 
 console = Console()
 
@@ -44,6 +45,7 @@ def cmd_bee_create(
     temperature: float = 0.0,
     tool_names: str = "",
     thinking_level: str = "off",
+    require_approval: str = "",
 ) -> None:
     """Create a new Worker Bee."""
     from hobees.db.session import session_scope
@@ -51,6 +53,18 @@ def cmd_bee_create(
     from hobees.core.model_discovery import fetch_provider_models
 
     tools = _parse_tool_names(tool_names)
+    approval_tools = _parse_tool_names(require_approval)
+    unknown = [name for name in approval_tools if name not in tools]
+    if unknown:
+        console.print(
+            f"{WARN} require_approval tools must also be in tools: {', '.join(unknown)}"
+        )
+    not_registered = unknown_tool_names(approval_tools)
+    if not_registered:
+        console.print(
+            f"{WARN} require_approval names tools that are not in the tool registry "
+            f"({', '.join(not_registered)}); a gate on an unregistered tool can never fire"
+        )
     with session_scope() as session:
         provider = session.get(LLMProvider, provider_id)
         if not provider:
@@ -77,6 +91,7 @@ def cmd_bee_create(
             temperature=temperature,
             thinking_level=thinking_level,
             tool_names=tools,
+            require_approval=approval_tools,
         )
         session.add(bee)
         session.flush()
@@ -131,6 +146,7 @@ def cmd_bee_update(
     system_prompt: str | None = None,
     role_description: str | None = None,
     tool_names: str = "",
+    require_approval: str = "",
 ) -> None:
     """Hot-swap provider, model, temperature, tools, or prompts mid-session."""
     from hobees.db.session import session_scope
@@ -168,6 +184,20 @@ def cmd_bee_update(
             bee.role_description = role_description
         if tool_names != "":
             bee.tool_names = _parse_tool_names(tool_names)
+        if require_approval != "":
+            approval_tools = _parse_tool_names(require_approval)
+            unknown = [name for name in approval_tools if name not in bee.tool_names]
+            if unknown:
+                console.print(
+                    f"{WARN} require_approval tools must also be in tools: {', '.join(unknown)}"
+                )
+            not_registered = unknown_tool_names(approval_tools)
+            if not_registered:
+                console.print(
+                    f"{WARN} require_approval names tools that are not in the tool registry "
+                    f"({', '.join(not_registered)}); a gate on an unregistered tool can never fire"
+                )
+            bee.require_approval = approval_tools
 
         # Interactive model picker if model changed and provider has models
         if model_name is not None and provider:
@@ -232,8 +262,14 @@ def cli_create(
         str, typer.Option("--tool-names", help="Comma-separated or JSON list of tool keys")
     ] = "",
     thinking_level: Annotated[str, typer.Option("--thinking", help="off | low | medium | high")] = "off",
+    require_approval: Annotated[
+        str,
+        typer.Option("--approval", help="Comma-separated or JSON list of gated tools (must also be in --tool-names)"),
+    ] = "",
 ) -> None:
-    cmd_bee_create(name, role_description, system_prompt, provider_id, model_name, temperature, tool_names, thinking_level)
+    cmd_bee_create(
+        name, role_description, system_prompt, provider_id, model_name, temperature, tool_names, thinking_level, require_approval
+    )
 
 
 @app.command(name="list")
@@ -251,9 +287,21 @@ def cli_update(
     system_prompt: Annotated[str | None, typer.Option("--system-prompt")] = None,
     role_description: Annotated[str | None, typer.Option("--role-description")] = None,
     tool_names: Annotated[str, typer.Option("--tool-names")] = "",
+    require_approval: Annotated[
+        str,
+        typer.Option("--approval", help="Comma-separated or JSON list of gated tools"),
+    ] = "",
 ) -> None:
     cmd_bee_update(
-        name, provider_id, model_name, temperature, thinking_level, system_prompt, role_description, tool_names
+        name,
+        provider_id,
+        model_name,
+        temperature,
+        thinking_level,
+        system_prompt,
+        role_description,
+        tool_names,
+        require_approval,
     )
 
 
