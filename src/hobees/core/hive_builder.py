@@ -25,6 +25,7 @@ from pathlib import Path
 from typing import Iterator
 
 from langchain_core.runnables import RunnableConfig
+from sqlalchemy.engine import URL
 
 from hobees.core.llm_factory import get_chat_model
 from hobees.core.telemetry import TelemetryCallbackHandler
@@ -56,7 +57,7 @@ def _build_hive_graph(
     hive: Hive,
     bees: list[Bee],
     providers: dict[int, LLMProvider],
-    db_url: str,
+    db_url: str | URL,
     thread_id: str,
     run_id: int | None = None,
     session_override_thinking: str | None = None,  # v1.1: session-wide thinking override
@@ -117,7 +118,9 @@ def _build_hive_graph(
     elif hasattr(hive, "project_path") and hive.project_path:
         project_root = Path(hive.project_path)
     else:
-        project_root = settings.artifacts_root / hive.name
+        from hobees.core.paths import safe_path_component
+
+        project_root = settings.artifacts_root / safe_path_component(hive.name)
 
     project_root.mkdir(parents=True, exist_ok=True)
     (project_root / "output").mkdir(parents=True, exist_ok=True)
@@ -441,7 +444,12 @@ def _build_hive_graph(
     graph.add_edge(START, "supervisor")
     graph.add_edge("supervisor", END)
 
-    return graph, thread_id, project_root, traces_dir, str(db_url)
+    # Rendered with the password intact: `str(db_url)` would write `***` and the
+    # checkpointer would then try to authenticate with that, while SQLAlchemy - holding the
+    # URL object - connects fine. See hobees.db.backends.render_db_url.
+    from hobees.db.backends import render_db_url
+
+    return graph, thread_id, project_root, traces_dir, render_db_url(db_url)
 
 
 def _emit_hive_event(
@@ -477,7 +485,7 @@ def hive_app(
     hive: Hive,
     bees: list[Bee],
     providers: dict[int, LLMProvider],
-    db_url: str,
+    db_url: str | URL,
     thread_id: str,
     run_id: int | None = None,
     session_override_thinking: str | None = None,
@@ -532,7 +540,7 @@ async def hive_app_async(
     hive: Hive,
     bees: list[Bee],
     providers: dict[int, LLMProvider],
-    db_url: str,
+    db_url: str | URL,
     thread_id: str,
     run_id: int | None = None,
     session_override_thinking: str | None = None,

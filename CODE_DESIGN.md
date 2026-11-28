@@ -464,7 +464,9 @@ def hive_app(hive, bees, providers, db_url, thread_id, run_id, thinking_override
 LangGraph checkpoint backend. File-backed SQLite checkpoints persist in the
 SQLite database; in-memory SQLite checkpoints are temporary. Hive tool output
 is written beneath the active project/artifact root, typically
-`artifacts/<hive>/scratchpad/<thread_id>/<call_id>.txt`.
+`artifacts/<hive>/scratchpad/<escaped thread key>/<call_id>.txt` (the thread key
+is escaped with `hobees.core.paths.safe_path_component()` so the directory is a
+legal path segment on Windows).
 
 **Applied in:** `hive_app()`, `hive_app_async()`, shell/TUI chats
 
@@ -619,7 +621,7 @@ flowchart TD
 |--------|----------------|-------------|
 | `config.py` | Application settings via pydantic-settings | `settings` (Settings instance) |
 | `db/session.py` | SQLAlchemy engine and session management | `get_engine()`, `session_scope()`, `dispose_engine()` |
-| `db/backends.py` | Validate supported database URLs and normalize PostgreSQL checkpoint URLs | `get_database_backend()`, `get_postgres_checkpoint_url()` |
+| `db/backends.py` | Validate supported database URLs, render them with the password intact, and normalize PostgreSQL checkpoint URLs | `get_database_backend()`, `render_db_url()`, `get_postgres_checkpoint_url()` |
 | `db/models.py` | SQLAlchemy ORM models matching schema | `LLMProvider`, `Bee`, `Hive`, `Run`, `UsageEvent`, `Memory`, `Skill`, `BeeSkill` |
 | `db/analytics.py` | Fast SQL aggregations for usage insights | `summary()`, `active_runs()`, `recent_events()`, `run_thread_usage()` |
 | `core/llm_factory.py` | Resolve provider rows → LangChain ChatModels with thinking_level | `get_chat_model()`, `resolve_api_key()`, `ThinkingLevel` |
@@ -630,8 +632,10 @@ flowchart TD
 | `core/model_discovery.py` | Auto-fetch models from local/remote providers | `fetch_provider_models()` |
 | `core/context_manager.py` | Worker projection, tool truncation, compaction | `project_worker_context()`, `truncate_tool_output()`, `compact_messages()` |
 | `core/memory_manager.py` | Scoped memory CRUD + prompt injection | `upsert_memory()`, `build_memory_block()`, `extract_namespaces()`, `save_memory`, `recall_memory` |
+| `core/config_export.py` | The active configuration as an importable document (shared by the Web UI YAML view and the Containers tab) | `config_document()`, `config_yaml()`, `has_config()` |
 | `core/skill_harvester.py` | Heuristic-based skill draft extraction for completed Hive runs and Markdown sync | `should_harvest()`, `harvest_completed_run()`, `extract_skill_draft()`, `persist_skill()`, `sync_skills_from_markdown()` |
-| `cli/main.py` | Typer entrypoint, init, stats, serve, prompt, shell | `app` (Typer), `init()`, `stats()`, `serve()`, `prompt()` |
+| `core/reset.py` | Reset scope + plan for the files hobees created inside `~/.hobees` (config scope, `--all` scope) | `build_plan()`, `apply_plan()`, `configured_database_file()`, `ResetPlan`, `ResetTarget`, `ResetResult` |
+| `cli/main.py` | Typer entrypoint, init, stats, serve, prompt, shell, reset | `app` (Typer), `init()`, `stats()`, `serve()`, `prompt()` |
 | `cli/shell.py` | prompt_toolkit REPL with slash-command router | `_shell_loop()` |
 | `cli/icons.py` | Unicode/ASCII icon registry with fallback | `APP`, `BEE`, `HIVE`, `QUEEN`, `SUCCESS`, `WARN`, `ERROR`, `MEMORY`, `SKILL`, `COMPACT`, `THINKING` |
 | `cli/provider_cmd.py` | Provider CRUD + model discovery + interactive picker | `cmd_provider_add()`, `cmd_provider_list()`, `cmd_provider_models()`, `interactive_model_picker()` |
@@ -639,6 +643,10 @@ flowchart TD
 | `cli/hive_cmd.py` | Hive CRUD + membership + thinking level | `cmd_hive_create()`, `cmd_hive_add_bee()`, `cmd_hive_thinking()` |
 | `cli/memory_cmd.py` | Memory CRUD across namespaces | `cmd_memory_list()`, `cmd_memory_add()`, `cmd_memory_forget()`, `cmd_memory_show()` |
 | `cli/skill_cmd.py` | Skill CRUD + assign + Markdown sync | `cmd_skill_list()`, `cmd_skill_create()`, `cmd_skill_save_last()`, `cmd_skill_assign()`, `cmd_skill_sync()` |
+| `cli/import_cmd.py` | Declarative config import (providers → bees → hives → memory → skills → assistant), collision analysis, conflict mode | `import_config()`, `analyze_config_conflicts()`, `collision_text()`, `CONFLICT_MODES` |
+| `core/pipeline_status.py` | How a pipeline learns a run ended: status to exit code, and the manifest read back | `pipeline_exit_code()`, `is_terminal()`, `manifest_entry()`, `read_manifest()`, `manifest_path_for()` |
+| `cli/pipeline_cmd.py` | `hobees pipeline status` for CI/job steps: manifest or run row, optional wait, exits with the mapped code | `cmd_pipeline_status()` |
+| `cli/reset_cmd.py` | Headless `hobees reset` presentation: plan listing, Y(es) confirmation, removal report | `reset_command()`, `print_plan()`, `_confirm_yes()` |
 | `api/app.py` | FastAPI REST + SSE endpoints | `create_app()` (FastAPI factory) |
 
 ---
@@ -704,6 +712,14 @@ def get_engine() -> Engine:
 
 PostgreSQL supports concurrent access from the CLI, `hobees stats`, and the
 FastAPI server.
+
+A URL must reach a connection as a `URL` object, not as text: `URL.__str__()` masks the
+password as `***`, so `str(engine.url)`, `str(session.bind.url)` or an f-string turns the mask
+into the password that is then sent to the server - the engine still connects because it holds
+the real value, while `PostgresSaver` fails with `password authentication failed`. Every place
+that needs the URL as text goes through `render_db_url()` / `render_as_string(hide_password=False)`,
+and `get_postgres_checkpoint_url()` rejects an already-masked URL so the failure names the lost
+password instead of looking like a wrong one.
 
 PostgreSQL is recommended when multiple processes or terminals share the
 database. SQLite is supported for local use; concurrent writes can contend

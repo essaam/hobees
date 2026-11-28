@@ -102,7 +102,7 @@ def test_shell_goal_sets_completed_at(monkeypatch, tmp_path):
             shell._handle_goal(
                 ["Complete", "a", "shell", "task"],
                 provider,
-                str(engine.url),
+                engine.url,
                 state,
             )
 

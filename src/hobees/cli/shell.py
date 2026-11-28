@@ -54,6 +54,7 @@ from hobees.core.streaming import DeltaStreamer
 from hobees.core.queen import Queen, build_queen
 from hobees.core.model_discovery import fetch_provider_models
 from hobees.db.models import Bee, Hive, HiveMembership, LLMProvider, Run
+from sqlalchemy.engine import URL
 from sqlalchemy.orm import joinedload
 from hobees.db.session import session_scope, get_engine
 
@@ -138,7 +139,7 @@ def _capture_session_state(
     }
 
 
-def _get_checkpointer(db_url):
+def _get_checkpointer(db_url: str | URL):
     """Get the appropriate checkpointer for the database type."""
     import sqlite3
 
@@ -176,7 +177,7 @@ def _get_checkpointer(db_url):
     return saver, connection
 
 
-async def _get_async_checkpointer(db_url):
+async def _get_async_checkpointer(db_url: str | URL):
     """Open an async-compatible checkpointer and return its resource stack."""
     from contextlib import AsyncExitStack
 

@@ -2,6 +2,12 @@
 
 Allows importing providers, bees, hives, memories, and skills from a YAML/JSON file.
 API keys are read from environment variables for security.
+
+An import writes by name, so a file can update entries the user already set up.
+`analyze_config_conflicts()` answers that question before anything is written, and
+`on_conflict` decides what happens: `overwrite` (the default, what a plain import
+always did) or `skip`, which keeps existing entries untouched. The Web UI template
+panel uses `skip` by default and confirms before applying a file that collides.
 """
 
 from __future__ import annotations
@@ -16,8 +22,65 @@ from rich.table import Table
 from rich.prompt import Confirm
 
 from hobees.cli.icons import SUCCESS, ERROR, WARN, APP, BEE, HIVE, MEMORY, SKILL
+from hobees.core.tool_registry import unknown_tool_names
 
 console = Console()
+
+#: What to do when an entry in the file has the same name as one in the database.
+CONFLICT_MODES: tuple[str, ...] = ("skip", "overwrite")
+#: Sections an import file can carry, in apply order.
+CONFIG_SECTIONS: tuple[str, ...] = ("providers", "bees", "hives", "memory", "skills", "assistant")
+
+
+def analyze_config_conflicts(config: dict) -> Dict[str, List[str]]:
+    """Names in `config` that already exist in the database, by section.
+
+    Read-only on purpose: it is what the CLI confirmation and the Web UI template
+    panel show before an import can overwrite existing work.
+    """
+    from hobees.db.session import session_scope
+    from hobees.db.models import Bee, Hive, LLMProvider, Memory, Skill
+
+    tracked = (
+        ("providers", LLMProvider, "alias"),
+        ("bees", Bee, "name"),
+        ("hives", Hive, "name"),
+        ("skills", Skill, "name"),
+    )
+    conflicts: Dict[str, List[str]] = {}
+
+    with session_scope() as session:
+        for section, model, field_name in tracked:
+            names = []
+            for entry in config.get(section) or []:
+                if not isinstance(entry, dict):
+                    continue
+                name = entry.get(field_name)
+                if name and session.query(model).filter_by(**{field_name: name}).first():
+                    names.append(str(name))
+            if names:
+                conflicts[section] = names
+
+        memory_names = []
+        for entry in config.get("memory") or []:
+            if not isinstance(entry, dict) or not entry.get("key"):
+                continue
+            namespace = entry.get("namespace", "global")
+            if session.query(Memory).filter_by(namespace=namespace, key=entry["key"]).first():
+                memory_names.append(f"{namespace}/{entry['key']}")
+        if memory_names:
+            conflicts["memory"] = memory_names
+
+        if config.get("assistant") and session.query(Bee).filter_by(name="assistant").first():
+            conflicts["assistant"] = ["assistant"]
+
+    return conflicts
+
+
+def collision_text(conflicts: Dict[str, List[str]]) -> str:
+    return "; ".join(
+        f"{section}: {', '.join(names)}" for section, names in sorted(conflicts.items())
+    )
 
 
 def _load_config_file(path: Path) -> dict:
@@ -71,7 +134,11 @@ def _resolve_env_vars(obj: Any) -> Any:
     return obj
 
 
-def _import_providers(config: dict, dry_run: bool = False) -> Dict[str, int]:
+def _import_providers(
+    config: dict,
+    dry_run: bool = False,
+    on_conflict: str = "overwrite",
+) -> Dict[str, int]:
     """Import providers from config. Returns mapping of alias -> provider_id."""
     from hobees.db.session import session_scope
     from hobees.db.models import LLMProvider
@@ -105,6 +172,10 @@ def _import_providers(config: dict, dry_run: bool = False) -> Dict[str, int]:
                 console.print(f"  {WARN} Provider {alias!r}: env var {api_key_env!r} not set")
 
             if existing:
+                if on_conflict == "skip":
+                    console.print(f"  {WARN} Provider {alias!r} already exists, kept unchanged")
+                    alias_to_id[alias] = existing.id
+                    continue
                 console.print(f"  {WARN} Provider {alias!r} already exists, updating")
                 if dry_run:
                     alias_to_id[alias] = existing.id
@@ -143,7 +214,12 @@ def _import_providers(config: dict, dry_run: bool = False) -> Dict[str, int]:
     return alias_to_id
 
 
-def _import_bees(config: dict, provider_alias_to_id: Dict[str, int], dry_run: bool = False) -> Dict[str, int]:
+def _import_bees(
+    config: dict,
+    provider_alias_to_id: Dict[str, int],
+    dry_run: bool = False,
+    on_conflict: str = "overwrite",
+) -> Dict[str, int]:
     """Import bees from config. Returns mapping of bee_name -> bee_id."""
     from hobees.db.session import session_scope
     from hobees.db.models import Bee
@@ -184,9 +260,20 @@ def _import_bees(config: dict, provider_alias_to_id: Dict[str, int], dry_run: bo
                     f"{WARN} Bee {name!r}: require_approval contains tools outside tools: "
                     f"{', '.join(unknown)}"
                 )
+            not_registered = unknown_tool_names(require_approval)
+            if not_registered:
+                console.print(
+                    f"{WARN} Bee {name!r}: require_approval names tools that are not in the "
+                    f"tool registry ({', '.join(not_registered)}) — a gate on an unregistered "
+                    "tool can never fire"
+                )
 
             existing = session.query(Bee).filter_by(name=name).first()
             if existing:
+                if on_conflict == "skip":
+                    console.print(f"  {WARN} Bee {name!r} already exists, kept unchanged")
+                    bee_name_to_id[name] = existing.id
+                    continue
                 if dry_run:
                     bee_name_to_id[name] = existing.id
                     console.print(f"  {BEE} Would update bee: {name} (provider={provider_alias})")
@@ -227,7 +314,7 @@ def _import_bees(config: dict, provider_alias_to_id: Dict[str, int], dry_run: bo
 
 
 def _import_hives(config: dict, provider_alias_to_id: Dict[str, int], 
-                  bee_name_to_id: Dict[str, int], dry_run: bool = False) -> Dict[str, int]:
+                  bee_name_to_id: Dict[str, int], dry_run: bool = False, on_conflict: str = "overwrite") -> Dict[str, int]:
     """Import hives from config. Returns mapping of hive_name -> hive_id."""
     from hobees.db.session import session_scope
     from hobees.db.models import Hive, HiveMembership
@@ -257,7 +344,13 @@ def _import_hives(config: dict, provider_alias_to_id: Dict[str, int],
                 continue
             
             existing = session.query(Hive).filter_by(name=name).first()
-            
+
+            if existing and on_conflict == "skip":
+                # Membership is part of the hive, so a skipped hive keeps its roster.
+                console.print(f"  {WARN} Hive {name!r} already exists, kept unchanged")
+                hive_name_to_id[name] = existing.id
+                continue
+
             project_path = h.get("project_path")
             if project_path:
                 project_path = _resolve_env_vars(project_path)
@@ -319,7 +412,11 @@ def _import_hives(config: dict, provider_alias_to_id: Dict[str, int],
     return hive_name_to_id
 
 
-def _import_memory(config: dict, dry_run: bool = False) -> int:
+def _import_memory(
+    config: dict,
+    dry_run: bool = False,
+    on_conflict: str = "overwrite",
+) -> int:
     """Import memory entries from config."""
     from hobees.db.session import session_scope
     from hobees.db.models import Memory
@@ -346,6 +443,9 @@ def _import_memory(config: dict, dry_run: bool = False) -> int:
             
             existing = session.query(Memory).filter_by(namespace=namespace, key=key).first()
             if existing:
+                if on_conflict == "skip":
+                    console.print(f"  {WARN} Memory {namespace}/{key} already exists, kept unchanged")
+                    continue
                 existing.content = content
                 existing.source_thread_id = m.get("source_thread_id")
             else:
@@ -361,7 +461,12 @@ def _import_memory(config: dict, dry_run: bool = False) -> int:
     return count
 
 
-def _import_skills(config: dict, bee_name_to_id: Dict[str, int], dry_run: bool = False) -> int:
+def _import_skills(
+    config: dict,
+    bee_name_to_id: Dict[str, int],
+    dry_run: bool = False,
+    on_conflict: str = "overwrite",
+) -> int:
     """Import skills from config."""
     from hobees.db.session import session_scope
     from hobees.db.models import Skill, BeeSkill, Bee
@@ -385,7 +490,17 @@ def _import_skills(config: dict, bee_name_to_id: Dict[str, int], dry_run: bool =
             
             # Check if skill exists
             skill = session.query(Skill).filter_by(name=name).first()
-            if not skill:
+            if skill:
+                if on_conflict == "skip":
+                    # Assignments are part of the skill, so a skipped skill keeps them.
+                    console.print(f"  {WARN} Skill {name!r} already exists, kept unchanged")
+                    continue
+                # Update existing
+                skill.description = s.get("description", skill.description)
+                skill.instructions = s.get("instructions", skill.instructions)
+                skill.tags = s.get("tags", skill.tags)
+                console.print(f"  {SUCCESS} Updated skill: {name}")
+            else:
                 skill = Skill(
                     name=name,
                     description=s.get("description", ""),
@@ -395,12 +510,6 @@ def _import_skills(config: dict, bee_name_to_id: Dict[str, int], dry_run: bool =
                 session.add(skill)
                 session.flush()
                 console.print(f"  {SUCCESS} Created skill: {name}")
-            else:
-                # Update existing
-                skill.description = s.get("description", skill.description)
-                skill.instructions = s.get("instructions", skill.instructions)
-                skill.tags = s.get("tags", skill.tags)
-                console.print(f"  {SUCCESS} Updated skill: {name}")
             
             # Assign to bees if specified
             bee_names = s.get("bees", [])
@@ -428,7 +537,12 @@ def _import_skills(config: dict, bee_name_to_id: Dict[str, int], dry_run: bool =
     return count
 
 
-def _import_assistant(config: dict, provider_alias_to_id: Dict[str, int], dry_run: bool = False) -> bool:
+def _import_assistant(
+    config: dict,
+    provider_alias_to_id: Dict[str, int],
+    dry_run: bool = False,
+    on_conflict: str = "overwrite",
+) -> bool:
     """Import assistant configuration from config."""
     from hobees.db.session import session_scope
     from hobees.db.models import Bee, LLMProvider
@@ -461,6 +575,9 @@ def _import_assistant(config: dict, provider_alias_to_id: Dict[str, int], dry_ru
         assistant = session.query(Bee).filter_by(name="assistant").first()
         
         if assistant:
+            if on_conflict == "skip":
+                console.print(f"  {WARN} Assistant bee already exists, kept unchanged")
+                return True
             # Update existing assistant
             assistant.provider_id = provider_id
             assistant.model_name = assistant_config.get("model", assistant_config.get("default_model", "gpt-4o-mini"))
@@ -487,17 +604,19 @@ def _import_assistant(config: dict, provider_alias_to_id: Dict[str, int], dry_ru
     return True
 
 
-def _show_summary(config: dict) -> None:
-    """Show a summary of what will be imported."""
+def _show_summary(config: dict, conflicts: Dict[str, List[str]] | None = None) -> None:
+    """Show a summary of what will be imported, flagging names already in the database."""
     table = Table(title="Import Summary")
     table.add_column("Resource", style="cyan")
     table.add_column("Count", justify="right")
-    
+    table.add_column("Already in the database", style="yellow")
+
     for resource in ["providers", "bees", "hives", "memory", "skills", "assistant"]:
         count = 1 if config.get(resource) else 0
         if count > 0:
-            table.add_row(resource.capitalize(), str(count))
-    
+            existing = (conflicts or {}).get(resource, [])
+            table.add_row(resource.capitalize(), str(count), ", ".join(existing) or "—")
+
     console.print(table)
 
 
@@ -505,6 +624,13 @@ def import_config(
     config_file: Annotated[Path, typer.Argument(help="Path to config file (YAML or JSON)")],
     dry_run: Annotated[bool, typer.Option("--dry-run", "-n", help="Show what would be imported without making changes")] = False,
     force: Annotated[bool, typer.Option("--force", "-f", help="Skip confirmation prompt")] = False,
+    on_conflict: Annotated[
+        str,
+        typer.Option(
+            "--on-conflict",
+            help=f"What to do with names that already exist: {' | '.join(CONFLICT_MODES)}",
+        ),
+    ] = "overwrite",
 ) -> None:
     """Import hobees configuration from a YAML/JSON file.
     
@@ -515,8 +641,16 @@ def import_config(
     - memory: Cross-session memory entries
     - skills: Reusable skills with optional bee assignments
     
+    Import writes by name, so existing entries are updated. Use --on-conflict skip to
+    leave them as they are, and the summary lists every name that would be touched so
+    the confirmation is about real collisions, not a blind yes.
+    
     Example: hobees import config.yaml
     """
+    if on_conflict not in CONFLICT_MODES:
+        console.print(f"{ERROR} --on-conflict must be one of: {', '.join(CONFLICT_MODES)}")
+        raise typer.Exit(code=1)
+
     config = _load_config_file(config_file)
     config = _resolve_env_vars(config)
     
@@ -524,14 +658,19 @@ def import_config(
         console.print(f"{WARN} Config file is empty")
         return
     
-    _show_summary(config)
+    conflicts = analyze_config_conflicts(config)
+    _show_summary(config, conflicts)
     
     if dry_run:
         console.print(f"\n{APP} [bold]DRY RUN[/bold] - No changes will be made")
         return
     
     if not force:
-        if not Confirm.ask("\nProceed with import?"):
+        question = "\nProceed with import?"
+        if conflicts:
+            touched = "would be updated" if on_conflict == "overwrite" else "will be kept as they are"
+            question = f"\nProceed with import? Existing entries {touched} — {collision_text(conflicts)}"
+        if not Confirm.ask(question):
             console.print("Import cancelled.")
             return
     
@@ -539,22 +678,22 @@ def import_config(
     
     # Import in order: providers -> bees -> hives -> memory -> skills
     console.print(f"[bold]Importing providers...[/bold]")
-    provider_alias_to_id = _import_providers(config, dry_run)
+    provider_alias_to_id = _import_providers(config, dry_run, on_conflict)
     
     console.print(f"\n[bold]Importing bees...[/bold]")
-    bee_name_to_id = _import_bees(config, provider_alias_to_id, dry_run)
+    bee_name_to_id = _import_bees(config, provider_alias_to_id, dry_run, on_conflict)
     
     console.print(f"\n[bold]Importing hives...[/bold]")
-    _import_hives(config, provider_alias_to_id, bee_name_to_id, dry_run)
+    _import_hives(config, provider_alias_to_id, bee_name_to_id, dry_run, on_conflict)
     
     console.print(f"\n[bold]Importing memory...[/bold]")
-    _import_memory(config, dry_run)
+    _import_memory(config, dry_run, on_conflict)
     
     console.print(f"\n[bold]Importing skills...[/bold]")
-    _import_skills(config, bee_name_to_id, dry_run)
+    _import_skills(config, bee_name_to_id, dry_run, on_conflict)
     
     console.print(f"\n[bold]Importing assistant...[/bold]")
-    _import_assistant(config, provider_alias_to_id, dry_run)
+    _import_assistant(config, provider_alias_to_id, dry_run, on_conflict)
     
     if not dry_run:
         console.print(f"\n{SUCCESS} Import complete!")

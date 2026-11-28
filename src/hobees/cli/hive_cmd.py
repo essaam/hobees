@@ -665,6 +665,9 @@ def cmd_hive_run(
         if broker is not None and event_queue is not None:
             broker.unsubscribe(event_queue)
 
+    from hobees.core.pipeline_status import pipeline_exit_code
+
+    final_status = "failed" if error_msg else ("awaiting_approval" if awaiting_approval else "completed")
     # Build and write manifest
     usage = run_thread_usage(thread_id) or {}
     manifest_data = {
@@ -674,14 +677,9 @@ def cmd_hive_run(
         "thread": thread_id,
         "hive_name": hive.name,
         "goal": goal,
-        "status": (
-            "failed"
-            if error_msg
-            else "awaiting_approval"
-            if awaiting_approval
-            else "completed"
-        ),
+        "status": final_status,
         "error": error_msg,
+        "exit_code": pipeline_exit_code(final_status),
         "started_at": start_time.isoformat(),
         "completed_at": completed_at.isoformat(),
         "duration_seconds": duration_sec,
@@ -732,8 +730,12 @@ def cmd_hive_run(
     else:
         console.print(output_text, markup=False)
 
-    if error_msg:
-        raise typer.Exit(code=1)
+    # The pipeline reads this code: 0 completed, 1 failed, 2 stopped for an approval a
+    # headless run cannot answer. A run that stops for approval is not a success, so it
+    # must not exit 0.
+    code = pipeline_exit_code(final_status)
+    if code:
+        raise typer.Exit(code=code)
 
 
 # ---------------------------------------------------------------------------
@@ -829,7 +831,10 @@ def cli_thinking(
 @app.command(name="run")
 def cli_run(
     hive_name: Annotated[str, typer.Argument(help="Hive name to activate")],
-    goal: Annotated[str, typer.Argument(help="Task/goal instruction for the Hive to accomplish")],
+    goal: Annotated[
+        str | None,
+        typer.Argument(help="Task/goal instruction, `-` to read stdin, or omit with --goal-file"),
+    ] = None,
     thread_id: Annotated[str | None, typer.Option("--thread", "-t", help="Thread ID to attach/resume")] = None,
     output_json: Annotated[bool, typer.Option("--json", help="Output run results as structured JSON to stdout")] = False,
     quiet: Annotated[bool, typer.Option("--quiet", "-q", help="Minimal output, suppress banners")] = False,
@@ -844,11 +849,21 @@ def cli_run(
     resume_reason: Annotated[str | None, typer.Option("--resume-reason", help="Reason for reject decisions")] = None,
     replay: Annotated[str | None, typer.Option("--replay", help="Replay from a LangGraph checkpoint ID")] = None,
     patch_message: Annotated[str | None, typer.Option("--patch-message", help="Patch replay state with a human message")] = None,
+    goal_file: Annotated[
+        str | None,
+        typer.Option("--goal-file", help="Read the goal from a file (or - for stdin)"),
+    ] = None,
 ) -> None:
-    """Execute a goal non-interactively using a Hive (headless / CI/CD mode)."""
+    """Execute a goal non-interactively using a Hive (headless / CI/CD mode).
+
+    The goal can be a long prompt, so it may also come from a file or stdin:
+    `hobees hive run dev-team --goal-file goal.txt`, `hobees hive run dev-team - < goal.txt`.
+    """
+    from hobees.cli.goal_input import require_goal, resolve_goal
+
     cmd_hive_run(
         hive_name=hive_name,
-        goal=goal,
+        goal=require_goal(resolve_goal(goal, goal_file)),
         thread_id=thread_id,
         output_json=output_json,
         quiet=quiet,

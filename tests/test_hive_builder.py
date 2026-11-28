@@ -1,13 +1,20 @@
 """Unit tests for Hive Builder and dynamic graph compilation."""
 
+from __future__ import annotations
+
 import asyncio
 import json
-from unittest.mock import MagicMock, patch
+import pytest
+from contextlib import asynccontextmanager, contextmanager
+from unittest.mock import AsyncMock, MagicMock, patch
 from langchain_core.language_models.chat_models import BaseChatModel
 from langchain_core.outputs import ChatResult, ChatGeneration
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 
+from langgraph.checkpoint.memory import MemorySaver
+
 from hobees.core.hive_builder import hive_app, hive_app_async
+from hobees.db.backends import get_postgres_checkpoint_url, render_db_url
 from hobees.db.models import Hive, Bee, LLMProvider
 
 
@@ -234,3 +241,123 @@ def test_file_sqlite_checkpoint_resumes_across_hive_apps(tmp_path):
         if isinstance(message, HumanMessage)
     ]
     assert user_messages == ["First task", "Second task"]
+
+
+def _postgres_run_inputs(tmp_path):
+    prov = LLMProvider(
+        id=1,
+        alias="test-prov",
+        provider_type="openai",
+        default_model="test-model",
+        input_cost_per_1m=0.0,
+        output_cost_per_1m=0.0,
+        context_window_tokens=128000,
+    )
+    bee = Bee(
+        id=1,
+        name="worker",
+        role_description="Test worker",
+        system_prompt="You are a test worker.",
+        provider_id=1,
+        model_name="test-model",
+        tool_names=[],
+        thinking_level="off",
+    )
+    bee.skills = []
+    hive = Hive(
+        id=1,
+        name="pg-hive",
+        goal_description="Test",
+        supervisor_provider_id=1,
+        supervisor_model_name="test-model",
+        supervisor_prompt="Supervisor {hive_name}: {worker_roster}",
+        is_dynamic=False,
+        project_path=str(tmp_path / "workspace"),
+    )
+    return hive, [bee], {1: prov}
+
+
+def test_the_sync_postgres_saver_gets_the_real_password(tmp_path):
+    """SQLAlchemy and `hobees init` connect with the URL object, so they keep the password.
+    A run that stringifies it first sends `***`, and Postgres answers with a failure that
+    looks like a wrong password rather than a lost one."""
+    from sqlalchemy.engine import make_url
+
+    hive, bees, providers = _postgres_run_inputs(tmp_path)
+    url = make_url("postgresql+psycopg://hobees:secretpass@localhost:5432/hobeesdb")
+    captured: list[str] = []
+
+    def fake_from_conn_string(conn_string):
+        captured.append(conn_string)
+
+        @contextmanager
+        def saver_context():
+            yield MemorySaver()
+
+        return saver_context()
+
+    with (
+        patch("hobees.core.hive_builder.get_chat_model", return_value=MockChatModel()),
+        patch("langgraph.checkpoint.postgres.PostgresSaver.from_conn_string", fake_from_conn_string),
+    ):
+        with hive_app(hive=hive, bees=bees, providers=providers, db_url=url, thread_id="pg-thread"):
+            pass
+
+    assert captured == ["postgresql://hobees:secretpass@localhost:5432/hobeesdb"]
+    assert "***" not in captured[0]
+    # The same URL through str() is what used to reach the saver.
+    assert str(url) == "postgresql+psycopg://hobees:***@localhost:5432/hobeesdb"
+
+
+def test_the_async_postgres_saver_gets_the_real_password(tmp_path):
+    from sqlalchemy.engine import make_url
+
+    hive, bees, providers = _postgres_run_inputs(tmp_path)
+    url = make_url("postgresql+psycopg://hobees:secretpass@localhost:5432/hobeesdb")
+    captured: list[str] = []
+
+    def fake_from_conn_string(conn_string):
+        captured.append(conn_string)
+
+        @asynccontextmanager
+        async def saver_context():
+            # The saver must be a real BaseCheckpointSaver for graph.compile(), so the
+            # in-memory one stands in while the connection string is captured.
+            saver = MemorySaver()
+            saver.setup = AsyncMock()
+            yield saver
+
+        return saver_context()
+
+    async def run():
+        with (
+            patch("hobees.core.hive_builder.get_chat_model", return_value=MockChatModel()),
+            patch("langgraph.checkpoint.postgres.aio.AsyncPostgresSaver.from_conn_string", fake_from_conn_string),
+        ):
+            async with hive_app_async(hive=hive, bees=bees, providers=providers, db_url=url, thread_id="pg-thread"):
+                return None
+
+        return None
+
+    asyncio.run(run())
+    assert captured == ["postgresql://hobees:secretpass@localhost:5432/hobeesdb"]
+    assert "***" not in captured[0]
+
+
+def test_a_stringified_url_is_refused_before_it_can_fail_authentication(tmp_path):
+    from sqlalchemy.engine import make_url
+
+    url = make_url("postgresql+psycopg://hobees:secretpass@localhost:5432/hobeesdb")
+
+    # A string that already lost the password cannot be recovered, so the run reports where
+    # it was lost instead of connecting with `***`.
+    with pytest.raises(ValueError, match="masked password"):
+        get_postgres_checkpoint_url(str(url))
+
+    assert render_db_url(url) == "postgresql+psycopg://hobees:secretpass@localhost:5432/hobeesdb"
+    assert "secretpass" in get_postgres_checkpoint_url(url)
+    assert "secretpass" in get_postgres_checkpoint_url(render_db_url(url))
+    # A plain string URL (what settings.database_url holds) keeps its password too.
+    assert "secretpass" in get_postgres_checkpoint_url(
+        "postgresql+psycopg://hobees:secretpass@localhost:5432/hobeesdb"
+    )

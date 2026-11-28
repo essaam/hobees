@@ -8,6 +8,8 @@
 
 _Hobees makes Bee and Hive workflows usable as repeatable command-line jobs, including in short-lived containers, while keeping an interactive shell and TUI available._ The name is inspired by honey bees. PostgreSQL is recommended for multi-process use, while SQLite is supported for local use.
 
+**Web app:** `hobees web` serves the bundled React SPA on `http://127.0.0.1:6543` — Workbench, Studio, Runs & Traces and Memory & Artifacts: live run streams over SSE, HITL approvals you can resolve in the browser, on-demand provider detection, Quick setup templates and Reset. No Node runtime is needed, the built bundle ships inside the package. Details: [Web App](#-web-app).
+
 ## Why `hobees`?
 
 Most multi-agent frameworks force you to write glue code to wire agents together, and then break down when you try to move from a local prototype to a reproducible pipeline. `hobees` treats agent teams as **portable, repeatable configuration**:
@@ -34,6 +36,9 @@ uv run hobees
 hobees # CLI
 hobees --tui
 hobees -p "Summarize this directory"
+
+# Or the web app on http://127.0.0.1:6543
+hobees web --open
 ```
 
 ### Zero-Config Onboarding
@@ -57,7 +62,7 @@ hobees hive run dev-team "Review the changes in src/ and suggest improvements"
 
 On **first launch with no providers configured**, hobees automatically scans your environment for available providers and offers to register them in one step:
 
-- Cloud: checks `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, `GEMINI_API_KEY`, `OPENROUTER_API_KEY`
+- Cloud: checks `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, `GEMINI_API_KEY`, `OPENROUTER_API_KEY`, `DEEPSEEK_API_KEY`
 - Local: probes `localhost:11434` (Ollama), `localhost:8080` (llama-server), `localhost:1234` (LM Studio)
 
 The scan runs once and writes `~/.hobees/.detected` so it never fires again on subsequent launches.
@@ -97,6 +102,7 @@ hobees run --hive dev-team --json "Add feature x to y"
 - [Approval Gates (HITL)](#-approval-gates-hitl)
 - [Interactive Shell](#interactive-shell)
 - [CLI Commands](#cli-commands)
+- [Web App](#-web-app)
 - [Container-Aware Thread IDs & Trace Inspection](#-container-aware-thread-ids--trace-inspection)
 - [Configuration](#configuration)
 - [Docker Compose](#docker-compose)
@@ -228,12 +234,21 @@ bees:
   - name: coder-bee
     provider: openai
     model: gpt-4o
-    tools: [read_file, write_file, run_shell]
-    require_approval: [write_file, run_shell]
+    tools: [read_file, write_file]
+    require_approval: [write_file]
 ```
 
-- `require_approval` is a JSON column on the `bees` table (`hobees init` adds it to existing databases) and is reconciled by `hobees import` / `hobees init --config`. Declare it in the config file — `hobees bee create` and the interactive `/bee create` do not yet collect it, so the import path is the way to set it today.
-- Every tool listed must also be in the Bee's `tools` list; `hobees import` and the shared Bee handlers warn when it is not.
+- `require_approval` is a JSON column on the `bees` table (`hobees init` adds it to existing databases) and is reconciled by `hobees import` / `hobees init --config`. It can also be set with `hobees bee create --approval write_file`, `hobees bee update --approval write_file`, or the Studio Bee dialog.
+- A gate only fires when three things line up: the tool is in the Bee's `tools` list, that tool is a **registered** tool, and the model actually calls it. `get_tools()` skips unknown names, so a gate on a name that is not in `TOOL_REGISTRY` can never fire — the built-in tools are `read_file`, `write_file`, `list_directory`, `run_python_calc`, `load_skill`, `save_memory`, `recall_memory`. `hobees import` and the shared Bee handlers warn when a gate names a tool that is missing from `tools` or is not registered.
+- `strict` never asks: it rejects the gated call with a policy `ToolMessage`. Only `interactive` (and `pause`) create a pending approval. The Web UI polls pending approvals and shows a **Gate open on this run** card on the Workbench plus the Approvals drawer ([Web App](#-web-app)).
+
+To see a gate fire end to end, create the Bee above (`hobees bee create gate-bee "writes files" "Use write_file when asked." 1 gpt-4o --tool-names write_file --approval write_file`), set the level to `interactive`, and prompt:
+
+```text
+Write the current date to report.txt in the output directory.
+```
+
+The run pauses at `TOOL_APPROVAL_REQUEST`, the run row becomes `awaiting_approval`, and the approval can be resolved from the Workbench card, the drawer, `hobees approvals`, or `POST /api/v1/approvals/{id}/resolve`.
 
 ### Levels
 
@@ -461,15 +476,112 @@ hobees skill list
 hobees skill create --name rust-async-patterns --description "Research Rust async patterns" --from-file ./skill.md
 hobees skill assign rust-async-patterns researcher
 
+# Import with collisions handled explicitly (an import writes by name)
+hobees import ./hobees.yaml                      # updates entries that already exist
+hobees import ./hobees.yaml --on-conflict skip   # keeps existing entries as they are
+hobees import ./hobees.yaml --dry-run            # lists what exists before anything is written
+
 # Single-shot execution
 hobees -p "summarize the latest docs"
 
 # Local API server
 hobees serve --port 8420
 
+# Web UI (Workbench, Studio & Trace Explorer) — default port 6543
+hobees web                       # http://127.0.0.1:6543
+hobees web --open --read-only    # same port, mutating endpoints disabled
+
 # Usage summary
 hobees stats --window 24h --group-by hive
+
+# Clean the slate (headless CLI only; the interactive shell and TUI do not offer it)
+hobees reset                     # env file, databases and config files inside ~/.hobees
+hobees reset --all               # same, plus artifacts, skills and the scratchpad cache
 ```
+
+### Reset the slate
+
+`hobees reset` starts hobees over. It lists what exists and asks for a `Y (yes)`
+answer before deleting anything — any other answer, or no answer at all, cancels
+and nothing is removed. It is headless-only: the interactive shell and the TUI do
+not carry a reset command, and the Web UI exposes the same two scopes on the
+Studio **Quick setup** tab ([Web App](#-web-app)), where the action stays disabled in
+`--read-only` mode and the endpoint only accepts requests from the origin it serves.
+
+| Scope              | What is removed                                                                                                   |
+| ------------------ | ----------------------------------------------------------------------------------------------------------------- |
+| `hobees reset`     | `~/.hobees/.env`, `~/.hobees/.detected`, the SQLite database files (and sidecars) inside `~/.hobees`, `~/.hobees/sessions/` |
+| `hobees reset --all` | the above, plus `~/.hobees/artifacts`, `~/.hobees/scratchpad`, the skills library and `HOBEES_ARTIFACTS_ROOT` |
+
+Nothing outside those paths is touched: environment variables exported in your
+shell keep their values, a project `.env` you created yourself is left alone, and a
+database served outside `~/.hobees` (e.g. PostgreSQL) loses only the URL stored in
+the env file — its rows stay on the server.
+
+The database file is always on the plan: when `HOBEES_DATABASE_URL` is not configured
+(for example right after a previous reset), `~/.hobees/hobees.db` is taken as the target
+through the default path, not skipped. A running process can still hold that file open —
+Windows refuses to delete a file with an active handle — so `apply_plan()` releases the
+SQLAlchemy pool before deleting, which is why the Studio panel and a reset run by its own
+process succeed. If a *different* process (a running web app, an open shell, a
+second terminal) holds it, reset does not force anything: it reports that path as failed
+and tells you to close that process and run again.
+
+After a reset the next launch rebuilds the slate: provider detection runs again, the
+default env file and database are recreated, and `hobees init` ensures the schema. A
+running web app needs a restart so the env file and schema are rebuilt too.
+
+## 🖥 Web App
+
+```bash
+hobees web                      # http://127.0.0.1:6543 (default port)
+hobees web --open --read-only   # mutating endpoints disabled
+```
+
+One FastAPI process serves the bundled SPA (no Node runtime) and `/api/v1`.
+
+| View | What it is for |
+| --- | --- |
+| **Workbench** | provider/model/target pickers, run a goal, live activity feed over SSE; a gate that opens on the watched run shows Approve / Edit / Reject inline |
+| **Studio** | **Quick setup** (templates + Reset), Hives, Bees, Providers, Skills, Containers; visual editor or a `hobees.yaml` round-trip |
+| **Runs & Traces** | container-keyed thread list, trace detail, checkpoint replay |
+| **Memory & Artifacts** | scoped memory browsing, artifacts and download |
+| **Approvals (HITL)** | pending gates from `GET /api/v1/approvals`, resolved with `POST /api/v1/approvals/{id}/resolve` or the Workbench card / drawer — same levels, precedence and audit trail as `hobees approvals` and the shell `/approvals` |
+
+Studio extras:
+
+- **Quick setup** — templates on top, **Reset** below (Reset appears only on this tab). Opening Studio without `?tab=` lands there while nothing is configured, otherwise on Hives. A template lists what it creates and every name it collides with; `Skip existing` is the default, and a colliding template needs a typed `Y (yes)` before `POST /api/v1/templates/apply` runs. `GET /api/v1/templates` reports the plan and collisions.
+- **Detect providers** (Providers tab) — scans env keys (`OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, `GEMINI_API_KEY`, `OPENROUTER_API_KEY`, `DEEPSEEK_API_KEY`) and probes `11434` (Ollama), `8080` (llama-server), `1234` (LM Studio); you then register only the candidates you tick. Detection itself writes nothing.
+- **Containers** — the tab generates the whole deployable set from what you are happy with now:
+  `compose.yaml`, `Dockerfile`, `hobees.yaml` (the active configuration), `goal.txt` and
+  `docker-entrypoint.sh`, in the shape of the set that is known to run against Docker.
+  `init-dirs` runs first as root, creates the folders the bind mounts point at (`./output`,
+  `./skills`) and hands them to `HOBEES_UID:HOBEES_GID`; the goal runner then
+  waits for it and for a healthy Postgres. The `Dockerfile` follows the tested one — `uv tool install hobees` from
+  PyPI, no source tree in the image — and the entrypoint initializes the schema with the copied
+  config, then runs the goal. The goal reaches the container as a **read-only mount** (default, so
+  the goal can change per run without a rebuild), a **baked `COPY`** (opt-in), or **stdin**, and the
+  prompt text is never written into the script, so it can never be read as shell. Running the web
+  app inside the container is optional and stays commented out by default. Generated paths are
+  relative (`./output`, `./skills`, `./goal.txt`, `./.env`) and the container name is read
+  at run time, so nothing from one machine is baked into a committed file. Postgres keeps its data in a
+  **named Docker volume** (`postgres_data`), declared in the top-level `volumes:` block at the bottom of
+  `compose.yaml` rather than in a host folder — Postgres owns it, `init-dirs` has nothing to prepare, and the
+  data survives `docker compose down`; `docker compose down -v` is what removes it. A volume typed as a host
+  path (`./pgdata`) still works and is still prepared by `init-dirs`. The Postgres service key and the
+  host name the container resolves come from the same field, so they cannot drift apart, and the ids baked
+  into the image (`--uid 1000 --gid 1000`) are the defaults `.env` maps the host user onto. Env values stay
+  `${NAME}` references, and the tab also generates **`.env.sample`** in the sections `.env` carries them in
+  (Host UID/GID mapping, Postgres credentials, Provider API keys, Hobees runtime configuration) — keys
+  without values, so the host that runs the container knows exactly what to fill in.
+  There is no `CMD` in the generated `Dockerfile`: the entrypoint script is the single place that
+  decides (init, then the goal), so a baked command line would duplicate it. The tab **only writes
+  files** — nothing in it starts or stops a container, so the shown
+  `docker compose --profile <profile> run --rm <service>` command (`-T` when the goal is piped) is
+  for you or CI to execute. A field change reaches the files only when you click **Update spec**, and
+  **Download all files** gives each file as its own download (not a pack).
+
+Read-only mode blocks every mutating call, destructive actions require a typed `Y (yes)`, and reset accepts requests from the origin it serves. `hobees reset` from a terminal is the same two scopes (`~/.hobees` config + `--all` for generated output).
 
 ---
 
@@ -506,7 +618,7 @@ hobees trace --thread <id> [--container <name>] [--hive <name>] [--json]
 
 The JSON record contains `container`, `thread`, `status` (`completed`, `awaiting_approval`, `failed`, or `unknown` when no run row exists), the `events` read from the JSONL file, `approvals` (mode, decision, `wait_ms`, original vs. edited args, reason) and `usage` (model, latency, tokens, `checkpoint_id`). The human output prints each gate as `GATE <mode>: <tool> [<decision>] bee=<bee>` and then the event list.
 
-Trace events are appended under `artifacts/<hive>/traces/`, and `/hive trace [name]` in the shell or TUI prints the newest log for a hive. Because `:` cannot appear in a Windows filename, the file name escapes it (`:` → `__`) — `coder-worker-1__hive__dev-team__pr-42.jsonl` — while the full key stays inside every event, so reconstruction joins by the event's `thread_id` rather than by the file name.
+Trace events are appended under `artifacts/<hive>/traces/`, and `/hive trace [name]` in the shell or TUI prints the newest log for a hive. Because `:` cannot appear in a Windows filename, the file name escapes it (`:` → `__`) — `coder-worker-1__hive__dev-team__pr-42.jsonl` — while the full key stays inside every event, so reconstruction joins by the event's `thread_id` rather than by the file name. The same escaping is applied to the scratchpad directory that stores offloaded tool output (`artifacts/<hive>/scratchpad/<escaped thread key>/<call_id>.txt`), so the path a Bee is shown is the path it can actually read back.
 
 ### Replay from a checkpoint
 
@@ -666,11 +778,80 @@ docker compose run --rm hobees hive list
 docker compose run --rm hobees hive run research-team "Summarize the project plan" --json
 ```
 
+The generated set runs a goal from a file or a pipe, which is what a pipeline wants:
+
+```bash
+# read-only mount (default): change the goal without rebuilding the image
+docker compose run --rm --profile pipeline init
+printf '%s' "Review src/ for race conditions" | docker compose run -T --rm --profile pipeline hobees run --hive dev-team -
+docker compose run --rm --profile pipeline hobees run --hive dev-team --goal-file /data/goal.txt --json
+
+# baked mode: the image is runnable on its own, but the goal is frozen in a layer
+docker compose run --rm --profile pipeline hobees   # entrypoint: init, then the goal file
+```
+
+### How a pipeline knows the run ended
+
+Nothing has to be added to the `Dockerfile` for this: hobees already exits with a meaningful code, and
+that code is the container's exit code. `docker run` and `docker compose run` hand it back to the
+caller, and that stays true when the container runs against a remote daemon (`DOCKER_HOST`,
+`docker -H ssh://pipeline-host` or `docker -H tcp://host:2376`) - the CLI's own exit status is the
+container's, so a CI step can simply test `$?` or `if ! docker compose run ...; then exit 1; fi`.
+
+| Code | Meaning |
+| --- | --- |
+| 0 | completed |
+| 1 | failed (error, timeout, bad config) |
+| 2 | stopped for an approval a headless run cannot answer |
+| 3 | still running (a status read that has not reached a terminal state) |
+
+The generated `docker-entrypoint.sh` keeps that path intact: `set -eu` stops on the first failure with
+that command's code, and `exec` replaces the shell so hobees' exit code is reported unchanged.
+
+A detached run has to read the code back:
+
+```bash
+docker compose run --rm --profile pipeline hobees            # exit status == the container's
+docker compose up -d --profile pipeline                      # detached: inspect afterwards
+docker inspect -f "{{.State.ExitCode}}" <container>
+docker compose up --exit-code-from hobees --profile pipeline # compose exits with the service's code
+```
+
+`hobees pipeline status` is the richer reading of the same outcome. It reads the manifest the run wrote
+into the artifacts mount, or the run row, prints status/error, and exits with the matching code - which
+is what a pipeline manager wants when the container ran on another host and only the mounted artifacts
+come back:
+
+```bash
+hobees pipeline status --hive dev-team --json                  # status, error, exit_code, thread
+hobees pipeline status --hive dev-team --poll 5 --timeout 120  # wait for a terminal state
+hobees pipeline status --thread-id 91318583
+```
+
+Every manifest entry now carries `exit_code`, so the two signals cannot disagree: the shell sees the
+number, and the JSON says the same number with the reason attached.
+The run writes the manifest to its artifacts directory and the run row to the database, so a pipeline
+manager on a different host has three ways to learn the outcome: the exit code from the `docker` call
+(it propagates over a remote daemon), the manifest through a shared mount, or the database row - the
+last two are what `hobees pipeline status` reads. Point `--manifest` at the shared path, or use
+`--hive`/`--thread-id` when the pipeline shares the same PostgreSQL.
+
+
 The `./artifacts` bind mount makes run outputs available on the host (worker-created files are under `artifacts/<hive>/output/`), and `./skills` persists Markdown skill files. The named `postgres_data` volume preserves providers, Bees, Hives, runs, memories, and checkpoints across container recreation and `docker compose down`. Remove the corresponding volume mappings from `compose.yaml` if persistence is not wanted. **`docker compose down -v` deletes the database volume and its contents.**
 
 A one-shot container is headless, so the approval default there is `strict`: a gated tool does not run unless the container sets `HOBEES_APPROVAL_MODE=auto` (or `pause`) in `.env` or passes `--approval-mode`. Container identity is `HOBEES_CONTAINER_NAME` if set, otherwise `HOSTNAME` (Docker's 12-char container id), so parallel workers using the same `hobees.yaml` write distinct thread keys — `worker-1:hive:...` vs `worker-2:hive:...` — and each run can be inspected from any other container with `hobees trace --container <name> --thread <id>`.
 
 To load declarative setup, uncomment the optional `./config:/config:ro` mount in `compose.yaml`, set `HOBEES_CONFIG_PATH=/config/hobees.yaml` in `.env`, and place the config file in `./config`. You can instead run a one-time import with `docker compose run --rm hobees init --config /config/hobees.yaml`.
+
+The web UI's **Studio → Containers** tab prepares that deployment from the browser: it builds the
+`compose.yaml`, `Dockerfile`, `hobees.yaml`, `goal.txt`, `docker-entrypoint.sh` and `.env.sample`
+from the live settings and the registered providers, shows validation warnings, and can save them to
+the project root (`HOBEES_PROJECT_ROOT`, fixed names) or download each file separately. The tab does not start or
+stop containers — `docker` and `docker compose` are run by you or by CI. The `Dockerfile` installs
+`hobees` from PyPI (`uv tool install hobees`), has no source tree in the image, and defines no `CMD`:
+`docker-entrypoint.sh` is what runs, initializing hobees with the copied config and then running the
+goal, with arguments passed to `docker compose run` as the override. Generated files reference
+environment variables by name (`${OPENAI_API_KEY}`), never by value, and run as a non-root user.
 
 Provider API keys are passed into the runtime container from `.env`; they are not baked into the image. Add any custom API-key environment variables used by your providers to `.env`. The app container runs as the numeric user configured by `HOBEES_UID` and `HOBEES_GID` so it can write to the artifacts and skills bind mounts.
 

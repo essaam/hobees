@@ -66,6 +66,65 @@ def plain(output: str) -> str:
     return " ".join(re.sub(r"\x1b\[[0-9;]*m", "", output).split())
 
 
+def test_a_gate_can_only_be_declared_on_a_registered_tool(monkeypatch, tmp_path, capsys):
+    from sqlalchemy import create_engine
+    from sqlalchemy.orm import sessionmaker
+
+    from hobees.cli import bee_cmd
+    from hobees.db import session as db_session
+    from hobees.db.models import Base, Bee, LLMProvider
+
+    engine = create_engine(f"sqlite:///{tmp_path / 'gate.sqlite'}")
+    Base.metadata.create_all(engine)
+    monkeypatch.setattr(db_session, "_engine", engine)
+    monkeypatch.setattr(
+        db_session,
+        "_SessionLocal",
+        sessionmaker(bind=engine, autoflush=False, expire_on_commit=False),
+    )
+    # Keep the model picker from reaching the network/stdin in a test run.
+    monkeypatch.setattr("hobees.core.model_discovery.fetch_provider_models", lambda *_a, **_k: [])
+
+    with db_session.session_scope() as session:
+        session.add(
+            LLMProvider(
+                alias="gate-provider",
+                provider_type="openai",
+                api_key_env="NONE",
+                default_model="m",
+                input_cost_per_1m=0.0,
+                output_cost_per_1m=0.0,
+            )
+        )
+        session.commit()
+        provider_id = session.query(LLMProvider).first().id
+
+    bee_cmd.cmd_bee_create(
+        "gate-test",
+        "Writes files",
+        "Use write_file when asked.",
+        provider_id,
+        "m",
+        0.0,
+        "write_file",
+        "off",
+        "write_file,run_shell",
+    )
+
+    out = capsys.readouterr().out
+    assert "not in the tool registry" in out
+    assert "run_shell" in out
+    assert "can never fire" in out
+
+    with db_session.session_scope() as session:
+        bee = session.query(Bee).filter_by(name="gate-test").first()
+        assert bee is not None
+        assert bee.tool_names == ["write_file"]
+        assert bee.require_approval == ["write_file", "run_shell"]
+
+    engine.dispose()
+
+
 def test_normalise_and_scope_parsing():
     assert normalize_level("  AUTO  ") == "auto"
     assert normalize_level("yes-please") is None
@@ -387,7 +446,7 @@ def test_shell_goal_passes_the_session_level_to_the_graph(monkeypatch, tmp_path)
         provider = session.get(LLMProvider, provider_id)
 
     state = {"approval_mode": "strict", "thinking_override": "auto"}
-    shell._handle_goal(["do", "the", "thing"], provider, str(engine.url), state)
+    shell._handle_goal(["do", "the", "thing"], provider, engine.url, state)
     assert captured["kwargs"]["approval_mode"] == "strict"
     engine.dispose()
 

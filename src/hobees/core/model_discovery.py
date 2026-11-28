@@ -161,4 +161,21 @@ def fetch_provider_models(
     return models
 
 
-__all__ = ["fetch_provider_models"]
+def resolve_model_name(provider, requested: str | None) -> str | None:
+    """The model a Bee or Hive uses when the caller left it blank.
+
+    Order: what was asked for, then the provider's default, then its assistant model, then
+    the first detected model - the same order the Web UI shows, so a model that looks chosen
+    on screen is the model that gets saved.
+    """
+    picked = (requested or "").strip()
+    if picked:
+        return picked
+    for value in (provider.default_model, provider.assistant_model):
+        if value:
+            return value
+    models = list(provider.available_models or [])
+    return models[0] if models else None
+
+
+__all__ = ["fetch_provider_models", "resolve_model_name"]

@@ -29,8 +29,17 @@ _CONFIG_DIR = Path.home() / ".hobees"
 _LEGACY_DEFAULT_DATABASE_URL = "sqlite:///hobees.db"
 
 
+def config_dir() -> Path:
+    """Return the hobees config folder (``~/.hobees``).
+
+    Every file hobees creates for itself lives here, which is also the boundary
+    :mod:`hobees.core.reset` will not delete outside of.
+    """
+    return _CONFIG_DIR
+
+
 def get_default_database_path() -> Path:
-    return _CONFIG_DIR / "hobees.db"
+    return config_dir() / "hobees.db"
 
 
 def _default_database_url() -> str:
@@ -145,6 +154,7 @@ def ensure_database_url() -> bool:
 
 __all__ = [
     "Settings",
+    "config_dir",
     "ensure_database_url",
     "get_default_database_path",
     "set_global_approval_mode",

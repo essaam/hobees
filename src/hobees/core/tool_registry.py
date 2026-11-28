@@ -74,18 +74,27 @@ def _get_project_root() -> str | None:
 def _resolve_tool_path(path: str, *, write: bool = False) -> Path:
     project_root = _get_project_root()
     if not project_root:
-        return Path(path).resolve()
+        try:
+            return Path(path).resolve()
+        except OSError as exc:
+            raise ValueError(f"{path!r} cannot be resolved on this system: {exc}") from exc
 
     root = Path(project_root).resolve()
     allowed_root = (root / "output").resolve() if write else root
     requested_path = Path(path)
     if write and not requested_path.is_absolute() and requested_path.parts[:1] == ("output",):
         requested_path = Path(*requested_path.parts[1:])
-    resolved = (
-        requested_path.resolve()
-        if requested_path.is_absolute()
-        else (allowed_root / requested_path).resolve()
-    )
+    try:
+        resolved = (
+            requested_path.resolve()
+            if requested_path.is_absolute()
+            else (allowed_root / requested_path).resolve()
+        )
+    except OSError as exc:
+        # Windows rejects path segments containing `:` (the default thread key is
+        # namespaced), so a raw key passed back to a tool must fail with a clear
+        # message instead of an unhandled OSError.
+        raise ValueError(f"{path!r} cannot be resolved on this system: {exc}") from exc
     if not resolved.is_relative_to(allowed_root):
         scope = "output directory" if write else "project root"
         raise ValueError(f"{path!r} is outside the configured {scope}")
@@ -234,6 +243,17 @@ for name, tool_obj in _BASE_TOOLS.items():
         TOOL_REGISTRY[name] = tool_obj
 
 
+def unknown_tool_names(names: list[str] | None) -> list[str]:
+    """Tool names that are not registered.
+
+    A Bee can only be gated on a tool it can actually call: `get_tools()` skips
+    unknown names, so a `require_approval` entry that is not in
+    :data:`TOOL_REGISTRY` can never fire (the README examples used `run_shell`,
+    which is not a built-in tool).
+    """
+    return [name for name in (names or []) if name not in TOOL_REGISTRY]
+
+
 def get_tools(tool_names: list[str] | None) -> list[BaseTool]:
     """Return the registered :class:`BaseTool` instances for the given names.
 
@@ -267,6 +287,7 @@ __all__ = [
     "recall_memory",
     "TOOL_REGISTRY",
     "get_tools",
+    "unknown_tool_names",
     "get_skill_metadata",
     "set_thread_context",
 ]

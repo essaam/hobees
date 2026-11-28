@@ -10,7 +10,8 @@ The detection is intentionally fast:
 
 This module is called at most *once* per installation: ``main._root()``
 writes a sentinel file (``~/.hobees/.detected``) after the first scan so
-subsequent launches are not delayed.
+subsequent launches are not delayed. The Web UI can rerun it on demand from the
+Providers tab, which is also where the catalog is read back by alias.
 """
 
 from __future__ import annotations
@@ -76,6 +77,18 @@ _CLOUD_PROVIDERS: list[dict] = [
         "context_window_tokens": 128000,
         "source_label": "env:OPENROUTER_API_KEY",
     },
+    {
+        "env_var": "DEEPSEEK_API_KEY",
+        "alias": "deepseek-main",
+        "provider_type": "openai_compatible",
+        "api_key_env": "DEEPSEEK_API_KEY",
+        "base_url": "https://api.deepseek.com/v1",
+        "default_model": "deepseek-chat",
+        "input_cost_per_1m": 0.27,
+        "output_cost_per_1m": 1.10,
+        "context_window_tokens": 65536,
+        "source_label": "env:DEEPSEEK_API_KEY",
+    },
 ]
 
 # Local providers: probed via fast TCP connect.
@@ -124,6 +137,21 @@ _LOCAL_PROVIDERS: list[dict] = [
 # ---------------------------------------------------------------------------
 # Public API
 # ---------------------------------------------------------------------------
+
+
+def find_detection_spec(alias: str) -> dict | None:
+    """Return the catalog entry for *alias* in the shape detection candidates use.
+
+    Lets a caller register one named candidate without probing anything again.
+    """
+    for spec in _CLOUD_PROVIDERS + _LOCAL_PROVIDERS:
+        if spec["alias"] == alias:
+            return {
+                key: value
+                for key, value in spec.items()
+                if key not in ("env_var", "host", "port")
+            }
+    return None
 
 
 def is_first_launch() -> bool:
@@ -254,6 +282,7 @@ def _apply_spec_to_row(row: object, spec: dict) -> None:
 __all__ = [
     "detect_available_providers",
     "auto_register_providers",
+    "find_detection_spec",
     "get_registered_provider_aliases",
     "is_first_launch",
     "mark_detected",
