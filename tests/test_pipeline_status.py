@@ -115,7 +115,9 @@ def test_the_manifest_carries_the_exit_code_and_the_entrypoint_keeps_it():
 
     script = container_prep.entrypoint_text(container_prep.ContainerSpec(goal="x"))
     assert "set -eu" in script
-    assert "exec run" in script
+    # `exec` is what keeps the code intact: the script replaces itself with hobees, so the
+    # container exits with the code the run returned.
+    assert 'exec hobees run "$@"' in script
     assert "0 completed, 1 failed, 2 stopped for an" in script
     assert "approval a headless run cannot answer" in script
 

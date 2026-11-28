@@ -25,14 +25,25 @@ export interface ContainerSpec {
   restart: string;
   ports: string[];
   volumes: string[];
+  init: boolean;
+  extra_hosts: string[];
+  // The service that prepares the bind-mounted folders before the goal runs.
+  init_service: string;
+  init_image: string;
+  init_workspace: string;
+  output_dir: string;
+  skills_dir: string;
   env: Record<string, string>;
   api_key_envs: string[];
   include_db: boolean;
   db_image: string;
   db_volume: string;
+  db_name: string;
+  db_user: string;
   postgres_service_name: string;
   // What the container carries and runs.
   config_file: string;
+  config_dir: string;
   goal: string;
   goal_file: string;
   goal_mode: 'mount' | 'bake' | 'stdin';

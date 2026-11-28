@@ -656,7 +656,7 @@ function ContainersTab({ readOnly }: { readOnly: boolean }) {
     container_name: '',
     profiles: 'pipeline',
     ports: '6543:6543',
-    volumes: './artifacts:/data/artifacts, ./skills:/data/skills',
+    volumes: './output:/home/hobees/output, ./skills:/home/hobees/skills',
     command: '',
     include_db: true,
     postgres_service_name: 'postgres',
@@ -726,16 +726,26 @@ function ContainersTab({ readOnly }: { readOnly: boolean }) {
     entrypoint: plan?.spec.entrypoint ?? [],
     command: list(fields.command),
     profiles: list(fields.profiles),
-    restart: plan?.spec.restart ?? 'unless-stopped',
+    restart: plan?.spec.restart ?? 'no',
     ports: list(fields.ports),
     volumes: list(fields.volumes),
+    init: plan?.spec.init ?? true,
+    extra_hosts: plan?.spec.extra_hosts ?? ['host.docker.internal:host-gateway'],
+    init_service: plan?.spec.init_service ?? 'init-dirs',
+    init_image: plan?.spec.init_image ?? 'alpine:3.20',
+    init_workspace: plan?.spec.init_workspace ?? '/workspace',
+    output_dir: plan?.spec.output_dir ?? 'output',
+    skills_dir: plan?.spec.skills_dir ?? 'skills',
     env: plan?.spec.env ?? {},
     api_key_envs: plan?.spec.api_key_envs ?? [],
     include_db: fields.include_db,
     db_image: plan?.spec.db_image ?? 'postgres:16-alpine',
-    db_volume: plan?.spec.db_volume ?? 'postgres_data',
+    db_volume: plan?.spec.db_volume ?? './postgres_data',
+    db_name: plan?.spec.db_name ?? 'hobeesdb',
+    db_user: plan?.spec.db_user ?? 'hobees',
     postgres_service_name: fields.postgres_service_name,
     config_file: plan?.spec.config_file ?? 'hobees.yaml',
+    config_dir: plan?.spec.config_dir ?? 'config',
     goal: fields.goal,
     goal_file: plan?.spec.goal_file ?? 'goal.txt',
     goal_mode: fields.goal_mode,
@@ -801,8 +811,33 @@ function ContainersTab({ readOnly }: { readOnly: boolean }) {
     setOutput(`Downloaded ${items.length} file${items.length === 1 ? '' : 's'} separately`);
   };
 
-  const runCommand = () =>
-    `docker compose run --rm --profile pipeline ${fields.service}${fields.command.trim() ? ` ${fields.command.trim()}` : ''}`;
+  // `docker compose run` starts a service from a profile, so the command follows the
+  // The host folders compose bind-mounts: init-dirs creates them and chowns them to the
+  // container user, so a run on a new machine needs only .env, not a manual mkdir.
+  const preparedDirs = () => {
+    const hosts = list(fields.volumes)
+      .map((mount) => mount.split(':')[0])
+      .filter((host) => host.startsWith('./'))
+      .map((host) => host.slice(2).split('/')[0]);
+    const dbVolume = plan?.spec.db_volume ?? './postgres_data';
+    if (fields.include_db && dbVolume.startsWith('./')) hosts.push(dbVolume.slice(2).split('/')[0]);
+    return hosts.filter(Boolean);
+  };
+
+  // `docker compose run` starts a service from a profile, so the command follows the
+  // profile field: one --profile per value, the service key, then the args typed above.
+  // In stdin mode there is no goal file, so the pipe needs -T (no TTY).
+  const runCommand = () => {
+    const profiles = list(fields.profiles).map((profile) => `--profile ${profile}`);
+    const tty = fields.goal_mode === 'stdin' ? ' -T' : '';
+    return [
+      'docker compose',
+      profiles.join(' '),
+      `run${tty} --rm`,
+      fields.service,
+      fields.command.trim(),
+    ].filter(Boolean).join(' ');
+  };
 
   if (isLoading || !plan) return <EmptyBox text="Reading the container plan…" />;
 
@@ -905,6 +940,14 @@ function ContainersTab({ readOnly }: { readOnly: boolean }) {
         {dirty ? <span className="font-medium text-amber-700"> Unapplied changes.</span> : null}
       </p>
 
+      <p className="text-xs text-zinc-500">
+        The container reads its values from <span className="font-mono">./.env</span>, so the generated files hold
+        names only: <span className="font-mono">.env.sample</span> mirrors the sections the tested set uses (Host
+        UID/GID mapping, Postgres credentials, Provider API keys, Hobees runtime configuration), and the
+        service, image, container name, profiles, ports, volumes, Postgres service name and the goal come from
+        the fields above.
+      </p>
+
       <label className="flex items-center gap-2 text-xs text-zinc-600">
             <input type="checkbox" checked={fields.run_init} onChange={(e) => setFields((prev) => ({ ...prev, run_init: e.target.checked }))} disabled={readOnly} />
             entrypoint runs <span className="font-mono">hobees init --config</span> before the goal
@@ -920,14 +963,23 @@ function ContainersTab({ readOnly }: { readOnly: boolean }) {
             ? 'goal.txt is mounted read-only, so the goal can change per run without a rebuild.'
             : fields.goal_mode === 'bake'
               ? 'goal.txt is copied into the image: the goal is frozen in a layer and needs a rebuild.'
-              : 'the goal is piped on stdin (docker compose run -T --rm ...), no file is written.'}
+              : 'the goal is piped on stdin (run -T --rm, shown above), no file is written.'}
           {' '}The goal text is never written into the entrypoint script, so it can never be read as shell.
         </p>
 
         <div className="flex items-center justify-between gap-2 rounded-lg border border-zinc-200 bg-white px-3 py-2">
           <div className="font-mono text-xs text-zinc-700 break-all">
             {runCommand()}
-            <div className="mt-1 text-zinc-500">the script itself runs: hobees init --config, then {pipeline.join(' ')}</div>
+            <div className="mt-1 text-zinc-500">
+              the script itself runs: {fields.run_init ? 'hobees init --config, then ' : ''}{pipeline.join(' ')}
+            </div>
+            {preparedDirs().length > 0 && (
+              <div className="mt-1 text-zinc-500">
+                <span className="font-mono">init-dirs</span> creates {preparedDirs().map((dir) => `./${dir}`).join(', ')} and hands them to
+                {' '}{plan?.spec.user ?? '${HOBEES_UID:-1000}:${HOBEES_GID:-1000}'} before
+                {' '}{fields.service} starts, so the bind mounts are writable without a rebuild.
+              </div>
+            )}
           </div>
           <div className="mt-2 text-xs text-zinc-500">
             The exit code is how a pipeline learns the outcome: 0 completed, 1 failed, 2 stopped for an approval,

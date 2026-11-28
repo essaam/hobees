@@ -283,7 +283,12 @@ def test_containers_tab_runs_the_goal_from_a_file_or_pipe():
 
     assert "Run for this goal" in studio
     assert "(['mount', 'bake', 'stdin'] as const)" in studio
-    assert "docker compose run --rm --profile pipeline" in studio
+    # The run command follows the fields: one --profile per profile value, the service key,
+    # and -T when the goal is piped instead of read from a file.
+    assert "docker compose" in studio
+    assert "profiles.join(' ')" in studio
+    assert "run${tty} --rm" in studio
+    assert "fields.service" in studio
     assert "The goal text is never written into the entrypoint script" in studio
     assert "hobees init --config" in studio
     assert "Export hobees.yaml" in studio

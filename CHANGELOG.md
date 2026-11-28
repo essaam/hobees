@@ -84,6 +84,27 @@ to a heading matching that version and add the release date.
 - Web UI: the Studio Containers tab no longer runs `docker`. `POST /api/v1/containers/action`, the
   `up|down|ps|logs` allowlist and `run_compose()` are gone: the tab writes the generated files, and the
   pipeline (or a person) executes them, so the code stays the signal.
+- Containers: the generated set now follows the files that are known to run against Docker, field for
+  field, and writes them on **Update spec**.
+  `compose.yaml` starts with an `init-dirs` service (alpine, running as root) that creates the folders the
+  bind mounts point at - `./output`, `./skills`, `./postgres_data` - and chowns them to
+  `HOBEES_UID:HOBEES_GID` before the goal runner and Postgres start; both `depends_on` it with
+  `service_completed_successfully`. The goal runner keeps `init: true`, `extra_hosts` for
+  `host.docker.internal` (so a `host.docker.internal` base_url resolves), `restart: "no"` and the profile,
+  and Postgres keeps its data in a project folder rather than a named volume and reads `./.env` instead of
+  an inline `environment:` block, with the healthcheck quoting `$${POSTGRES_USER}`/`$${POSTGRES_DB}` so the
+  container shell expands them.
+  The image creates the user with the ids `.env` maps the host onto (1000/1000, not 10001), installs hobees
+  into `/opt/uv-tools` with `UV_TOOL_BIN_DIR=/usr/local/bin`, and copies `hobees.yaml` and
+  `docker-entrypoint.sh` under the home directory; the script then keeps the same four numbered steps
+  (init, args override, `set --`, the goal), so the **run_init** checkbox now actually decides whether the
+  init step is written.
+  `.env.sample` is laid out in the sections `.env` carries: Host UID/GID mapping, Postgres credentials,
+  Provider API keys, Hobees runtime configuration - paths and the hive come from there instead of being
+  repeated in the compose `environment:` block.
+  The run command follows the profiles field rather than a hardcoded `pipeline`:
+  `docker compose --profile <profile> run --rm <service>`, one `--profile` per value, with `-T` when the
+  goal is piped, and the panel shows which folders `init-dirs` prepares.
 - CLI: `hobees run` and `hobees hive run` exit **2** when the run stops for an approval instead of
   looking successful with 0.
 - CLI: the Web UI default port is now **6543** (`hobees web` without `--port`, and the

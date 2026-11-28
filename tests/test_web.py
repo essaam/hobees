@@ -718,8 +718,11 @@ def test_container_plan_reports_the_generated_set_and_saves_it(web_env, monkeypa
     assert plan["config"]
     assert plan["entrypoint"].startswith("#!/bin/sh")
     assert "hobees init --config" in plan["entrypoint"]
-    assert plan["pipeline_command"] == ["run", "--goal-file", "/data/goal.txt", "--json"]
-    assert "./goal.txt:/data/goal.txt:ro" in plan["compose"]
+    assert plan["pipeline_command"] == ["run", "--json", '"$(cat /home/hobees/goal.txt)"']
+    assert "./goal.txt:/home/hobees/goal.txt:ro" in plan["compose"]
+    # init-dirs is the first service: the folders the bind mounts point at are created and
+    # chowned to the container user before anything that writes into them starts.
+    assert "init-dirs" in plan["compose"]
     assert any("no goal set" in warning for warning in plan["warnings"])
     # The .env key checklist is part of the generated set: keys, no values.
     sample = client.post("/api/v1/containers/plan", json={"goal": "x", "api_key_envs": ["OPENAI_API_KEY"]}).json()["env_sample"]
@@ -730,8 +733,8 @@ def test_container_plan_reports_the_generated_set_and_saves_it(web_env, monkeypa
         "/api/v1/containers/plan",
         json={"goal": "Review src/", "goal_mode": "bake", "run_hive": "dev-team"},
     ).json()
-    assert "COPY --chown=hobees:hobees goal.txt /data/goal.txt" in baked["dockerfile"]
-    assert baked["pipeline_command"] == ["run", "--hive", "dev-team", "--goal-file", "/data/goal.txt", "--json"]
+    assert "COPY --chown=hobees:hobees goal.txt ${HOME}/goal.txt" in baked["dockerfile"]
+    assert baked["pipeline_command"] == ["run", "--hive", "dev-team", "--json", '"$(cat /home/hobees/goal.txt)"']
 
     # A prompt that looks like shell stays text: it is only ever written to the goal file.
     injection = client.post(

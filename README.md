@@ -554,23 +554,27 @@ Studio extras:
 - **Detect providers** (Providers tab) — scans env keys (`OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, `GEMINI_API_KEY`, `OPENROUTER_API_KEY`, `DEEPSEEK_API_KEY`) and probes `11434` (Ollama), `8080` (llama-server), `1234` (LM Studio); you then register only the candidates you tick. Detection itself writes nothing.
 - **Containers** — the tab generates the whole deployable set from what you are happy with now:
   `compose.yaml`, `Dockerfile`, `hobees.yaml` (the active configuration), `goal.txt` and
-  `docker-entrypoint.sh`. The `Dockerfile` follows the repo one — `uv tool install hobees` from
+  `docker-entrypoint.sh`, in the shape of the set that is known to run against Docker.
+  `init-dirs` runs first as root, creates the folders the bind mounts point at (`./output`,
+  `./skills`, `./postgres_data`) and hands them to `HOBEES_UID:HOBEES_GID`; the goal runner then
+  waits for it and for a healthy Postgres. The `Dockerfile` follows the tested one — `uv tool install hobees` from
   PyPI, no source tree in the image — and the entrypoint initializes the schema with the copied
   config, then runs the goal. The goal reaches the container as a **read-only mount** (default, so
   the goal can change per run without a rebuild), a **baked `COPY`** (opt-in), or **stdin**, and the
   prompt text is never written into the script, so it can never be read as shell. Running the web
   app inside the container is optional and stays commented out by default. Generated paths are
-  relative (`./artifacts`, `./skills`, `./goal.txt`, `./.env`) and the container name is read at run time,
-  so nothing from one machine is baked into a committed file. Each path is defined once — the
-  `Dockerfile` `ENV` sets `HOBEES_CONFIG_PATH`/`HOBEES_GOAL_FILE` and the script reads them from the
-  environment rather than repeating the value — and the Postgres service key and the host name the
-  container resolves come from the same field, so they cannot drift apart. Env values stay `${NAME}`
-  references, and the tab also generates **`.env.sample`**: the keys the generated files read, listed
-  without values (required first, then the ones compose can default), so the host that runs the
-  container knows exactly what to fill in.
+  relative (`./output`, `./skills`, `./goal.txt`, `./postgres_data`, `./.env`) and the container name is read
+  at run time, so nothing from one machine is baked into a committed file; the Postgres data folder is a
+  project folder rather than a named volume so `init-dirs` can prepare it. The Postgres service key and the
+  host name the container resolves come from the same field, so they cannot drift apart, and the ids baked
+  into the image (`--uid 1000 --gid 1000`) are the defaults `.env` maps the host user onto. Env values stay
+  `${NAME}` references, and the tab also generates **`.env.sample`** in the sections `.env` carries them in
+  (Host UID/GID mapping, Postgres credentials, Provider API keys, Hobees runtime configuration) — keys
+  without values, so the host that runs the container knows exactly what to fill in.
   There is no `CMD` in the generated `Dockerfile`: the entrypoint script is the single place that
   decides (init, then the goal), so a baked command line would duplicate it. The tab **only writes
-  files** — nothing in it starts or stops a container, so the shown `docker compose run …` command is
+  files** — nothing in it starts or stops a container, so the shown
+  `docker compose --profile <profile> run --rm <service>` command (`-T` when the goal is piped) is
   for you or CI to execute. A field change reaches the files only when you click **Update spec**, and
   **Download all files** gives each file as its own download (not a pack).
 
